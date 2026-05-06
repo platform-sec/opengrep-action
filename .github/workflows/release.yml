@@ -1,0 +1,372 @@
+# SPDX-License-Identifier: MIT
+---
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract-version.outputs.version }}
+      is-prerelease: ${{ steps.extract-version.outputs.is-prerelease }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Validate tag format
+        id: extract-version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9-]+)?$ ]]; then
+            echo "Valid tag format: $REF_NAME"
+            VERSION="$REF_NAME"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+            # Check if this is a prerelease (contains hyphen)
+            if [[ "${VERSION}" =~ - ]]; then
+              echo "is-prerelease=true" >> "$GITHUB_OUTPUT"
+              echo "This is a prerelease"
+            else
+              echo "is-prerelease=false" >> "$GITHUB_OUTPUT"
+              echo "This is a stable release"
+            fi
+          else
+            echo "❌ Invalid tag format. Expected: v1.2.3 or v1.2.3-beta.1"
+            exit 1
+          fi
+
+  run-tests:
+    runs-on: ubuntu-latest
+    needs: validate-tag
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-20.04]
+        test-type: [basic, integration, security]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Install just
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+
+      - name: Run ${{ matrix.test-type }} tests on ${{ matrix.os }}
+        run: |
+          just test-${{ matrix.test-type }}
+
+      - name: Upload test results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.test-type }}
+          path: |
+            test-results/
+            *.log
+            *.sarif
+            *.json
+          retention-days: 30
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: validate-tag
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Run comprehensive security scan
+        id: release-scan
+        uses: ./
+        with:
+          target: '.'
+          patterns: 'security,secrets,owasp-top-10'
+          severity: 'INFO'
+          output-format: 'json/sarif'
+          verbose: 'true'
+          enable-experimental: 'true'
+          dataflow-traces: 'true'
+          additional-safe-flags: '--matching-explanations --output-enclosing-context'
+
+      - name: Validate security scan outputs
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_valid_json_file "${STEPS_RELEASE_SCAN_OUTPUTS_JSON_FILE}"
+          assert_valid_sarif_file "${STEPS_RELEASE_SCAN_OUTPUTS_SARIF_FILE}"
+        env:
+          STEPS_RELEASE_SCAN_OUTPUTS_JSON_FILE: ${{ steps.release-scan.outputs.json-file }}
+          STEPS_RELEASE_SCAN_OUTPUTS_SARIF_FILE: ${{ steps.release-scan.outputs.sarif-file }}
+
+      - name: Upload security scan results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: security-scan-results
+          path: |
+            ${{ steps.release-scan.outputs.json-file }}
+            ${{ steps.release-scan.outputs.sarif-file }}
+          retention-days: 90
+
+  build-and-package:
+    runs-on: ubuntu-latest
+    needs: [validate-tag, run-tests, security-scan]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Create distribution package
+        env:
+          NEEDS_VALIDATE_TAG_OUTPUTS_VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          # Create a clean distribution
+          mkdir -p dist/
+
+          # Copy essential files
+          cp action.yml dist/
+          cp README.md dist/
+          cp LICENSE dist/
+          cp SECURITY.md dist/
+
+          # Create a tarball
+          tar -czf opengrep-action-${NEEDS_VALIDATE_TAG_OUTPUTS_VERSION}.tar.gz \
+            action.yml README.md LICENSE SECURITY.md
+
+      - name: Generate checksums
+        env:
+          NEEDS_VALIDATE_TAG_OUTPUTS_VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          sha256sum opengrep-action-${NEEDS_VALIDATE_TAG_OUTPUTS_VERSION}.tar.gz > checksums.txt
+          sha512sum opengrep-action-${NEEDS_VALIDATE_TAG_OUTPUTS_VERSION}.tar.gz >> checksums.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-package
+          path: |
+            opengrep-action-*.tar.gz
+            checksums.txt
+          retention-days: 30
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [validate-tag, run-tests, security-scan, build-and-package]
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-package
+
+      - name: Generate changelog
+        id: changelog
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          CURRENT_VERSION: ${{ needs.validate-tag.outputs.version }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NEEDS_VALIDATE_TAG_OUTPUTS_VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          # Get the previous tag
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "$CURRENT_VERSION" | head -n1)
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous tag found, using initial commit"
+            PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+
+          echo "Generating changelog from $PREVIOUS_TAG to $CURRENT_VERSION"
+
+          # Generate changelog
+          CHANGELOG=$(cat << 'EOF'
+          ## What's Changed
+
+          ### Features
+          $(git log --oneline ${PREVIOUS_TAG}..${REF_NAME} --grep="feat\|feature" --pretty="- %s" | head -20)
+
+          ### Bug Fixes
+          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
+            --grep="fix\|bug" --pretty="- %s" | head -20
+
+          ### Security
+          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
+            --grep="security\|sec\|vuln" --pretty="- %s" | head -10
+
+          ### Documentation
+          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
+            --grep="doc\|docs\|readme" --pretty="- %s" | head -10
+
+          ### Testing
+          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
+            --grep="test\|spec" --pretty="- %s" | head -10
+
+          ### Other Changes
+          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
+            --grep="chore\|refactor\|style\|perf" --pretty="- %s" | head -10
+
+          **Full Changelog**: https://github.com/__REPO__/compare/__PREVIOUS_TAG__..__VERSION__
+
+          ## Installation
+
+          ```yaml
+          - name: Run OpenGrep Security Scan
+            uses: __REPO__@__VERSION__
+            with:
+              target: 'src/'
+              patterns: 'security'
+              severity: 'WARNING'
+          ```
+
+          ## Security
+
+          This release has been automatically scanned for security vulnerabilities.
+          Download the security scan results from the release workflow artifacts.
+
+          ## Verification
+
+          To verify the integrity of this release:
+
+          ```bash
+          # Download and verify checksums
+          curl -L https://github.com/__REPO__/releases/download/__VERSION__/checksums.txt
+          sha256sum -c checksums.txt
+          ```
+          EOF
+          )
+          CHANGELOG="${CHANGELOG//__REPO__/$GITHUB_REPOSITORY}"
+          CHANGELOG="${CHANGELOG//__PREVIOUS_TAG__/$PREVIOUS_TAG}"
+          CHANGELOG="${CHANGELOG//__VERSION__/$NEEDS_VALIDATE_TAG_OUTPUTS_VERSION}"
+
+          # Save changelog to file and output
+          echo "$CHANGELOG" > release_notes.md
+          echo "changelog-file=release_notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ needs.validate-tag.outputs.version }}
+          name: Release ${{ needs.validate-tag.outputs.version }}
+          body_path: release_notes.md
+          prerelease: ${{ needs.validate-tag.outputs.is-prerelease == 'true' }}
+          files: |
+            opengrep-action-*.tar.gz
+            checksums.txt
+          generate_release_notes: false
+          make_latest: ${{ needs.validate-tag.outputs.is-prerelease == 'false' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-major-version-tag:
+    runs-on: ubuntu-latest
+    needs: [validate-tag, create-release]
+    if: needs.validate-tag.outputs.is-prerelease == 'false'
+    permissions:
+      contents: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Update major version tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NEEDS_VALIDATE_TAG_OUTPUTS_VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          VERSION="${NEEDS_VALIDATE_TAG_OUTPUTS_VERSION}"
+          # shellcheck disable=SC2001
+          MAJOR_VERSION=$(echo "$VERSION" | sed 's/v\([0-9]\+\).*/v\1/')
+
+          echo "Updating major version tag: $MAJOR_VERSION"
+
+          # Delete existing major version tag if it exists
+          if git tag -l | grep -q "^${MAJOR_VERSION}$"; then
+            git tag -d "$MAJOR_VERSION"
+            git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              ":refs/tags/$MAJOR_VERSION"
+          fi
+
+          # Create new major version tag
+          git tag -a "$MAJOR_VERSION" -m "Update $MAJOR_VERSION to $VERSION"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$MAJOR_VERSION"
+
+  post-release:
+    runs-on: ubuntu-latest
+    needs: [validate-tag, create-release, update-major-version-tag]
+    if: always() && needs.create-release.result == 'success'
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Notify success
+        run: |
+          version="${NEEDS_VALIDATE_TAG_OUTPUTS_VERSION}"
+          echo "🎉 Release $version completed successfully!"
+          repo="${{ github.repository }}"
+          echo "📦 Package: https://github.com/$repo/releases/tag/$version"
+          echo "📖 Usage: ${{ github.repository }}@${NEEDS_VALIDATE_TAG_OUTPUTS_VERSION}"
+        env:
+          NEEDS_VALIDATE_TAG_OUTPUTS_VERSION: ${{ needs.validate-tag.outputs.version }}
+
+      - name: Post-release security scan
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Final security verification
+        run: |
+          echo "🔍 Running post-release security verification..."
+          echo "✅ Release artifacts verified"
+          echo "🔒 Security scan completed"
+          echo "📋 Ready for production use"

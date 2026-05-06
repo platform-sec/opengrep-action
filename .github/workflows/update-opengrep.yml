@@ -1,0 +1,209 @@
+# SPDX-License-Identifier: MIT
+---
+name: Update OpenGrep
+
+on:
+  schedule:
+    # Weekly on Monday at 09:00 UTC.
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-opengrep
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update Pinned OpenGrep Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve Latest OpenGrep Release
+        id: latest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(mktemp)"
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -o "$release_json" \
+            "https://api.github.com/repos/opengrep/opengrep/releases/latest"
+
+          python3 - "$release_json" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          release_path = Path(sys.argv[1])
+          output_path = Path(sys.argv[2])
+          release = json.loads(release_path.read_text())
+          asset_name = "opengrep-core_linux_x86.tar.gz"
+
+          tag_name = release.get("tag_name", "")
+          version = tag_name.removeprefix("v")
+          asset = next(
+              (item for item in release.get("assets", [])
+               if item.get("name") == asset_name),
+              None,
+          )
+
+          if not re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?", version):
+              raise SystemExit(f"Invalid OpenGrep release tag: {tag_name}")
+
+          if not asset:
+              raise SystemExit(f"Release asset not found: {asset_name}")
+
+          digest = asset.get("digest", "")
+          checksum = digest.removeprefix("sha256:")
+          if not re.fullmatch(r"[A-Fa-f0-9]{64}", checksum):
+              raise SystemExit(f"Invalid SHA256 digest for {asset_name}: {digest}")
+
+          with output_path.open("a") as handle:
+              handle.write(f"version={version}\n")
+              handle.write(f"checksum={checksum}\n")
+          PY
+
+      - name: Update Pinned Version
+        id: update
+        shell: bash
+        env:
+          LATEST_VERSION: ${{ steps.latest.outputs.version }}
+          LATEST_CHECKSUM: ${{ steps.latest.outputs.checksum }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["LATEST_VERSION"]
+          checksum = os.environ["LATEST_CHECKSUM"]
+
+          def replace_once(text, pattern, replacement, description):
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit(f"Unable to update {description}")
+              return updated
+
+          action_path = Path("action.yml")
+          action_text = action_path.read_text()
+          action_text = replace_once(
+              action_text,
+              r"(  opengrep-version:\n(?:    .+\n)*?    default: )'[^']+'",
+              rf"\1'{version}'",
+              "action input default",
+          )
+          action_text = replace_once(
+              action_text,
+              r'DEFAULT_OPENGREP_VERSION="[^"]+"',
+              f'DEFAULT_OPENGREP_VERSION="{version}"',
+              "installer default version",
+          )
+          action_text = replace_once(
+              action_text,
+              r'DEFAULT_EXPECTED_SHA256="[A-Fa-f0-9]{64}"',
+              f'DEFAULT_EXPECTED_SHA256="{checksum}"',
+              "installer default checksum",
+          )
+          action_path.write_text(action_text)
+
+          readme_path = Path("README.md")
+          readme_text = readme_path.read_text()
+          readme_text = replace_once(
+              readme_text,
+              r"(\| `opengrep-version` \| `)[^`]+(` \|)",
+              rf"\g<1>{version}\2",
+              "README input table default",
+          )
+          readme_text = re.sub(
+              r"opengrep-version: '[0-9]+[.][0-9]+[.][0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?'",
+              f"opengrep-version: '{version}'",
+              readme_text,
+          )
+          readme_text = re.sub(
+              r"opengrep-checksum: '[A-Fa-f0-9]{64}'",
+              f"opengrep-checksum: '{checksum}'",
+              readme_text,
+          )
+          readme_path.write_text(readme_text)
+          PY
+
+          if git diff --quiet -- action.yml README.md; then
+            printf 'changed=false\n' >> "$GITHUB_OUTPUT"
+            printf 'OpenGrep is already pinned to v%s.\n' "$LATEST_VERSION"
+            exit 0
+          fi
+
+          printf 'changed=true\n' >> "$GITHUB_OUTPUT"
+          git diff -- action.yml README.md
+
+      - name: Open Pull Request
+        if: steps.update.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LATEST_VERSION: ${{ steps.latest.outputs.version }}
+          LATEST_CHECKSUM: ${{ steps.latest.outputs.checksum }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          branch="automation/opengrep-v${LATEST_VERSION}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add action.yml README.md
+          git commit -m "security: update opengrep to v${LATEST_VERSION}"
+          git push --force-with-lease \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:$branch"
+
+          body=$(cat <<EOF
+          Updates the default OpenGrep release used by this action.
+
+          - OpenGrep version: v${LATEST_VERSION}
+          - Linux x86 asset checksum: \`${LATEST_CHECKSUM}\`
+
+          The action still verifies the downloaded archive before installation.
+          EOF
+          )
+
+          existing_pr=$(gh pr list \
+            --base "$BASE_BRANCH" \
+            --head "$branch" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "$existing_pr" ]; then
+            gh pr edit "$existing_pr" \
+              --title "security: update OpenGrep to v${LATEST_VERSION}" \
+              --body "$body"
+          else
+            gh pr create \
+              --base "$BASE_BRANCH" \
+              --head "$branch" \
+              --title "security: update OpenGrep to v${LATEST_VERSION}" \
+              --body "$body"
+          fi

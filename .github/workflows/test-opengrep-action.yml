@@ -1,0 +1,280 @@
+# SPDX-License-Identifier: MIT
+---
+# Run with: act -W .github/workflows/test-opengrep-action.yml
+name: Test OpenGrep Action
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'action.yml'
+      - '.github/workflows/test-*.yml'
+      - 'test/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test-basic-scan:
+    name: Basic Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Create Test Files
+        run: |
+          source tests/helpers/format-output-validation.sh
+          create_format_fixture test-code/basic-format
+      - name: Run Scan
+        id: scan
+        uses: ./
+        with:
+          target: 'test-code/basic-format/src/'
+          patterns: 'test-code/basic-format/rules.yml'
+          output-format: 'json/sarif'
+          strict: 'false'
+          verbose: 'true'
+      - name: Verify Outputs
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_format_json_finding "${STEPS_SCAN_OUTPUTS_JSON_FILE}"
+          assert_format_sarif_finding "${STEPS_SCAN_OUTPUTS_SARIF_FILE}"
+          [ "${STEPS_SCAN_OUTPUTS_FINDINGS_COUNT}" = "1" ] || {
+            echo "Expected 1 finding, got ${STEPS_SCAN_OUTPUTS_FINDINGS_COUNT}"
+            exit 1
+          }
+          echo "Findings: ${STEPS_SCAN_OUTPUTS_FINDINGS_COUNT}"
+        env:
+          STEPS_SCAN_OUTPUTS_JSON_FILE: ${{ steps.scan.outputs.json-file }}
+          STEPS_SCAN_OUTPUTS_SARIF_FILE: ${{ steps.scan.outputs.sarif-file }}
+          STEPS_SCAN_OUTPUTS_FINDINGS_COUNT: ${{ steps.scan.outputs.findings-count }}
+
+  test-single-formats:
+    name: Single Output Formats
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        format: [json, sarif, text]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Create Test Files
+        run: |
+          source tests/helpers/format-output-validation.sh
+          create_format_fixture test-code/single-format
+      - name: Run Format Scan
+        id: fmt
+        uses: ./
+        with:
+          target: 'test-code/single-format/src/'
+          patterns: 'test-code/single-format/rules.yml'
+          output-format: ${{ matrix.format }}
+          output-file: results.${{ matrix.format }}
+          strict: 'false'
+      - name: Verify Format
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          FILE="${STEPS_FMT_OUTPUTS_RESULTS_FILE}"
+          assert_format_output "${MATRIX_FORMAT}" "$FILE"
+        env:
+          MATRIX_FORMAT: ${{ matrix.format }}
+          STEPS_FMT_OUTPUTS_RESULTS_FILE: ${{ steps.fmt.outputs.results-file }}
+
+  test-advanced-options:
+    name: Advanced Options
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Create Test Files
+        run: |
+          source tests/helpers/format-output-validation.sh
+          create_format_fixture test-code/advanced-format WARNING
+      - name: Run Advanced Scan
+        id: adv
+        uses: ./
+        with:
+          target: 'test-code/advanced-format/src/'
+          patterns: 'test-code/advanced-format/rules.yml'
+          severity: 'WARNING'
+          enable-experimental: 'true'
+          dataflow-traces: 'true'
+          exclude-minified-files: 'true'
+          additional-safe-flags: '--matching-explanations'
+          strict: 'false'
+      - name: Verify Advanced
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_format_json_finding "${STEPS_ADV_OUTPUTS_JSON_FILE}"
+          assert_format_sarif_finding "${STEPS_ADV_OUTPUTS_SARIF_FILE}"
+        env:
+          STEPS_ADV_OUTPUTS_JSON_FILE: ${{ steps.adv.outputs.json-file }}
+          STEPS_ADV_OUTPUTS_SARIF_FILE: ${{ steps.adv.outputs.sarif-file }}
+
+  test-strict-mode:
+    name: Strict Mode
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Create Deliberately Vulnerable File
+        run: |
+          mkdir -p test-code/strict
+          echo 'eval(userInput);' > test-code/strict/strict.js
+      - name: Run Strict Scan (expect failure due to findings)
+        id: strict
+        uses: ./
+        continue-on-error: true
+        with:
+          target: 'test-code/strict'
+          patterns: 'auto'
+          output-format: 'json'
+          strict: 'true'
+      - name: Verify Strict Mode Failure
+        run: |
+          echo "Outcome: ${STEPS_STRICT_OUTCOME}"
+          echo "Findings: ${STEPS_STRICT_OUTPUTS_FINDINGS_COUNT}"
+          [ "${STEPS_STRICT_OUTCOME}" = "failure" ] || {
+            echo 'Strict mode did not fail as expected'
+            exit 1
+          }
+          [ "${STEPS_STRICT_OUTPUTS_FINDINGS_COUNT}" != "0" ] || {
+            echo 'Expected non-zero findings in strict mode'
+            exit 1
+          }
+        env:
+          STEPS_STRICT_OUTCOME: ${{ steps.strict.outcome }}
+          STEPS_STRICT_OUTPUTS_FINDINGS_COUNT: ${{ steps.strict.outputs.findings-count }}
+
+  test-error-handling:
+    name: Error Handling
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Run Invalid Scan (bad output-format)
+        id: invalid
+        uses: ./
+        continue-on-error: true
+        with:
+          target: '.'
+          output-format: 'invalid'
+          strict: 'false'
+      - name: Verify Failure Was Detected
+        run: |
+          echo "Outcome: ${STEPS_INVALID_OUTCOME}"
+          # Expect the validation step to fail
+          [ "${STEPS_INVALID_OUTCOME}" = "failure" ] || { echo 'Expected failure not observed'; exit 1; }
+        env:
+          STEPS_INVALID_OUTCOME: ${{ steps.invalid.outcome }}
+
+  test-large-files:
+    name: Large File Handling
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - name: Create Large File
+        run: |
+          mkdir -p big
+          python3 -c "print('print(\\'x\\')\\n'*60000)" > big/large.py
+      - name: Run Size-Limited Scan
+        id: large
+        uses: ./
+        with:
+          target: 'big/'
+          max-target-bytes: '1000'
+          verbose: 'true'
+          strict: 'false'
+        continue-on-error: true
+      - name: Check Large File Behavior
+        run: |
+          echo "Outcome: ${STEPS_LARGE_OUTCOME}"
+          if [ -f "${STEPS_LARGE_OUTPUTS_JSON_FILE}" ]; then
+            echo 'JSON produced (files > limit skipped)'
+          fi
+        env:
+          STEPS_LARGE_OUTCOME: ${{ steps.large.outcome }}
+          STEPS_LARGE_OUTPUTS_JSON_FILE: ${{ steps.large.outputs.json-file }}
+
+  test-summary:
+    name: Functional Summary
+    runs-on: ubuntu-latest
+    needs:
+      - test-basic-scan
+      - test-single-formats
+      - test-advanced-options
+      - test-strict-mode
+      - test-error-handling
+      - test-large-files
+    if: always()
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Summarize
+        run: |
+          echo '=== Functional Test Summary ==='
+          echo "Basic Scan:       ${NEEDS_TEST_BASIC_SCAN_RESULT}"
+          echo "Single Formats:   ${NEEDS_TEST_SINGLE_FORMATS_RESULT}"
+          echo "Advanced Options: ${NEEDS_TEST_ADVANCED_OPTIONS_RESULT}"
+          echo "Strict Mode:      ${NEEDS_TEST_STRICT_MODE_RESULT}"
+          echo "Error Handling:   ${NEEDS_TEST_ERROR_HANDLING_RESULT}"
+          echo "Large Files:      ${NEEDS_TEST_LARGE_FILES_RESULT}"
+          PASS=0; TOTAL=6
+          [ "${NEEDS_TEST_BASIC_SCAN_RESULT}" == success ] && PASS=$((PASS+1))
+          [ "${NEEDS_TEST_SINGLE_FORMATS_RESULT}" == success ] && PASS=$((PASS+1))
+          [ "${NEEDS_TEST_ADVANCED_OPTIONS_RESULT}" == success ] && PASS=$((PASS+1))
+          [ "${NEEDS_TEST_STRICT_MODE_RESULT}" == success ] && PASS=$((PASS+1))
+          [ "${NEEDS_TEST_ERROR_HANDLING_RESULT}" == success ] && PASS=$((PASS+1))
+          [ "${NEEDS_TEST_LARGE_FILES_RESULT}" == success ] && PASS=$((PASS+1))
+          echo "Overall: $PASS/$TOTAL passed"
+          [ $PASS -eq $TOTAL ] || exit 1
+        env:
+          NEEDS_TEST_BASIC_SCAN_RESULT: ${{ needs.test-basic-scan.result }}
+          NEEDS_TEST_SINGLE_FORMATS_RESULT: ${{ needs.test-single-formats.result }}
+          NEEDS_TEST_ADVANCED_OPTIONS_RESULT: ${{ needs.test-advanced-options.result }}
+          NEEDS_TEST_STRICT_MODE_RESULT: ${{ needs.test-strict-mode.result }}
+          NEEDS_TEST_ERROR_HANDLING_RESULT: ${{ needs.test-error-handling.result }}
+          NEEDS_TEST_LARGE_FILES_RESULT: ${{ needs.test-large-files.result }}

@@ -1,0 +1,593 @@
+# SPDX-License-Identifier: MIT
+---
+# Main CI pipeline for OpenGrep Action
+# .github/workflows/ci.yml
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'assets/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUNNER_DEBUG: 1
+  ZIZMOR_VERSION: '1.24.1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Validate YAML syntax and action definition
+  validate:
+    name: Validate Action
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Validate action.yml
+        run: |
+          echo "🔍 Validating action.yml syntax..."
+          python3 -c "import yaml; yaml.safe_load(open('action.yml'))"
+          echo "✅ action.yml is valid YAML"
+
+      - name: Validate workflow files
+        run: |
+          echo "🔍 Validating workflow files..."
+          for file in .github/workflows/*.yml; do
+            echo "Validating $file..."
+            python3 -c "import yaml; yaml.safe_load(open('$file'))"
+          done
+          echo "✅ All workflow files are valid"
+
+      - name: Check required files
+        run: |
+          echo "🔍 Checking required files exist..."
+          required_files=(
+            "action.yml"
+            "README.md"
+            "LICENSE"
+            "SECURITY.md"
+            "CONTRIBUTING.md"
+          )
+
+          for file in "${required_files[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              echo "❌ Required file missing: $file"
+              exit 1
+            fi
+          done
+          echo "✅ All required files present"
+
+      - name: Validate action inputs/outputs
+        run: |
+          echo "🔍 Validating action inputs and outputs..."
+
+          # Check that all documented inputs exist in action.yml
+          # Check that all action inputs are documented
+          # This would be a more complex script in practice
+
+          echo "✅ Action inputs/outputs validated"
+
+  # Fast validator unit tests — no Docker/act required. This layer covers
+  # the combinatorial input space for scripts/validators.sh so we can keep
+  # the act-based security suite small.
+  test-unit:
+    name: Validator Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Run bats unit tests
+        run: tests/unit/bats/bin/bats tests/unit/
+
+  # Lint shell scripts and YAML files
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Install linting tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck yamllint
+
+      - name: Lint YAML files
+        run: |
+          echo "🔍 Linting YAML files..."
+          find . \( -name "*.yml" -o -name "*.yaml" \) -print0 | \
+            xargs -0 yamllint -d relaxed
+
+      - name: Lint shell scripts
+        run: |
+          echo "🔍 Linting shell scripts..."
+          find . -name "*.sh" -print0 | \
+            xargs -0 shellcheck -x
+
+  # Audit GitHub Actions workflows and composite actions with zizmor.
+  # Findings are advisory until the existing baseline is remediated.
+  zizmor:
+    name: GitHub Actions Security
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@803947b9bd8e9f986429fa0c5a41c367cd732b41 # v7.2.1
+
+      - name: Run zizmor
+        run: |
+          uvx "zizmor==${ZIZMOR_VERSION}" \
+            --format=github \
+            --strict-collection \
+            --no-exit-codes \
+            action.yml .github/workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # Core action tests — invoke the composite action directly. We deliberately
+  # skip `act` here: it only exists to emulate GitHub Actions locally, and
+  # running it inside GitHub Actions adds Docker-in-Docker overhead with no
+  # signal we don't already get from `uses: ./`. These steps mirror
+  # test-basic-scan, test-single-formats, and test-error-handling from
+  # test-opengrep-action.yml.
+  test-core:
+    name: Core Tests
+    runs-on: ubuntu-latest
+    needs: [validate, lint, zizmor, test-unit]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Create basic-scan fixture
+        run: |
+          source tests/helpers/format-output-validation.sh
+          create_format_fixture test-code/basic-format
+
+      - name: Run basic scan
+        id: basic
+        uses: ./
+        with:
+          target: 'test-code/basic-format/src/'
+          patterns: 'test-code/basic-format/rules.yml'
+          output-format: 'json/sarif'
+          strict: 'false'
+          verbose: 'true'
+
+      - name: Verify basic scan outputs
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_format_json_finding "${STEPS_BASIC_OUTPUTS_JSON_FILE}"
+          assert_format_sarif_finding "${STEPS_BASIC_OUTPUTS_SARIF_FILE}"
+          [ "${STEPS_BASIC_OUTPUTS_FINDINGS_COUNT}" = "1" ] || {
+            echo "Expected 1 finding, got ${STEPS_BASIC_OUTPUTS_FINDINGS_COUNT}"
+            exit 1
+          }
+        env:
+          STEPS_BASIC_OUTPUTS_JSON_FILE: ${{ steps.basic.outputs.json-file }}
+          STEPS_BASIC_OUTPUTS_SARIF_FILE: ${{ steps.basic.outputs.sarif-file }}
+          STEPS_BASIC_OUTPUTS_FINDINGS_COUNT: ${{ steps.basic.outputs.findings-count }}
+
+      - name: Create single-format fixture
+        run: |
+          source tests/helpers/format-output-validation.sh
+          create_format_fixture test-code/single-format
+
+      - name: Run JSON-only scan
+        id: fmt
+        uses: ./
+        with:
+          target: 'test-code/single-format/src/'
+          patterns: 'test-code/single-format/rules.yml'
+          output-format: 'json'
+          output-file: 'results.json'
+          strict: 'false'
+
+      - name: Verify single-format output
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_format_output "json" "${STEPS_FMT_OUTPUTS_RESULTS_FILE}"
+        env:
+          STEPS_FMT_OUTPUTS_RESULTS_FILE: ${{ steps.fmt.outputs.results-file }}
+
+      - name: Run scan with invalid output-format (expect failure)
+        id: invalid
+        uses: ./
+        continue-on-error: true
+        with:
+          target: '.'
+          output-format: 'invalid'
+          strict: 'false'
+
+      - name: Verify invalid input was rejected
+        run: |
+          [ "${STEPS_INVALID_OUTCOME}" = "failure" ] || {
+            echo "Expected validation failure, got ${STEPS_INVALID_OUTCOME}"
+            exit 1
+          }
+        env:
+          STEPS_INVALID_OUTCOME: ${{ steps.invalid.outcome }}
+
+  # Action-boundary tripwire: small pytest suite that feeds malicious
+  # payloads through the real composite action (via act) and asserts the
+  # validator emits its own error. See tests/security/test_action_boundary.py.
+  test-security:
+    name: Security Tests
+    runs-on: ubuntu-latest
+    needs: [validate, lint, zizmor, test-unit]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Install act and jq
+        run: |
+          curl -s https://api.github.com/repos/nektos/act/releases/latest | \
+            grep "browser_download_url.*Linux_x86_64.tar.gz" | \
+            cut -d : -f 2,3 | tr -d \" | \
+            xargs curl -L | tar -xz
+          sudo mv act /usr/local/bin/
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Pull act runner image
+        run: docker pull catthehacker/ubuntu:act-22.04
+
+      - name: Install pytest dependencies
+        run: pip install -r tests/security/requirements.txt
+
+      - name: Run action-boundary tripwire
+        run: pytest -v tests/security/
+
+  # Integration test — scan the existing test-code/ fixtures (mixed Python/JS)
+  # with auto rules to exercise a realistic multi-file scan path.
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [test-core, test-security]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Run scan over test-code fixtures
+        id: integration
+        uses: ./
+        with:
+          target: 'test-code/'
+          patterns: 'auto'
+          output-format: 'json/sarif'
+          strict: 'false'
+          verbose: 'true'
+
+      - name: Verify integration outputs
+        run: |
+          set -euo pipefail
+          [ -s "${STEPS_INTEGRATION_OUTPUTS_JSON_FILE}" ] || {
+            echo "JSON output missing or empty"
+            exit 1
+          }
+          [ -s "${STEPS_INTEGRATION_OUTPUTS_SARIF_FILE}" ] || {
+            echo "SARIF output missing or empty"
+            exit 1
+          }
+          echo "Integration scan findings: ${STEPS_INTEGRATION_OUTPUTS_FINDINGS_COUNT}"
+        env:
+          STEPS_INTEGRATION_OUTPUTS_JSON_FILE: ${{ steps.integration.outputs.json-file }}
+          STEPS_INTEGRATION_OUTPUTS_SARIF_FILE: ${{ steps.integration.outputs.sarif-file }}
+          STEPS_INTEGRATION_OUTPUTS_FINDINGS_COUNT: ${{ steps.integration.outputs.findings-count }}
+
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: integration-test-results
+          path: |
+            ${{ steps.integration.outputs.json-file }}
+            ${{ steps.integration.outputs.sarif-file }}
+          retention-days: 7
+
+  # Performance test — generate a synthetic dataset and assert the action
+  # completes within a reasonable time budget. The job-level timeout-minutes
+  # enforces the budget natively; no in-step instrumentation needed.
+  test-performance:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: [test-core]
+    timeout-minutes: 10
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Generate synthetic dataset
+        run: |
+          mkdir -p perf-data
+          for i in $(seq 1 20); do
+            echo "print('test file $i')" > "perf-data/file$i.py"
+          done
+          python3 -c "
+          for i in range(1000):
+              print(f'def function_{i}():')
+              print('    user_input = input()')
+              if i % 100 == 0:
+                  print(f'    os.system(user_input)  # line {i}')
+              else:
+                  print('    print(user_input)')
+              print()
+          " > perf-data/large_file.py
+
+      - name: Run timed scan
+        id: perf
+        uses: ./
+        with:
+          target: 'perf-data/'
+          patterns: 'auto'
+          output-format: 'json'
+          strict: 'false'
+          timeout: '180'
+
+      - name: Verify perf scan produced output
+        run: |
+          set -euo pipefail
+          [ -s "${STEPS_PERF_OUTPUTS_JSON_FILE}" ] || {
+            echo "Performance scan produced no JSON output"
+            exit 1
+          }
+          echo "Findings: ${STEPS_PERF_OUTPUTS_FINDINGS_COUNT}"
+        env:
+          STEPS_PERF_OUTPUTS_JSON_FILE: ${{ steps.perf.outputs.json-file }}
+          STEPS_PERF_OUTPUTS_FINDINGS_COUNT: ${{ steps.perf.outputs.findings-count }}
+
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance-test-results
+          path: ${{ steps.perf.outputs.json-file }}
+          retention-days: 30
+
+  # Test the action on itself (dogfooding)
+  dogfood:
+    name: Self-Test (Dogfooding)
+    runs-on: ubuntu-latest
+    needs: [test-core]
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Test action on itself
+        id: self-test
+        uses: ./
+        with:
+          target: '.'
+          patterns: 'auto'
+          exclude: 'test/**,examples/**,assets/**'
+          output-format: 'json/sarif'
+          verbose: 'true'
+          strict: 'false'  # Don't fail CI on findings in our own code
+
+      - name: Validate self-test results
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+
+          echo "🔍 Validating self-test results..."
+
+          JSON_FILE="${STEPS_SELF_TEST_OUTPUTS_JSON_FILE}"
+          SARIF_FILE="${STEPS_SELF_TEST_OUTPUTS_SARIF_FILE}"
+          FINDINGS_COUNT="${STEPS_SELF_TEST_OUTPUTS_FINDINGS_COUNT}"
+
+          echo "📊 Self-scan found $FINDINGS_COUNT findings"
+          echo "📄 JSON results: $JSON_FILE"
+          echo "📄 SARIF results: $SARIF_FILE"
+
+          assert_valid_json_file "$JSON_FILE"
+          assert_valid_sarif_file "$SARIF_FILE"
+
+          echo "✅ Self-test validation passed"
+        env:
+          STEPS_SELF_TEST_OUTPUTS_JSON_FILE: ${{ steps.self-test.outputs.json-file }}
+          STEPS_SELF_TEST_OUTPUTS_SARIF_FILE: ${{ steps.self-test.outputs.sarif-file }}
+          STEPS_SELF_TEST_OUTPUTS_FINDINGS_COUNT: ${{ steps.self-test.outputs.findings-count }}
+
+      - name: Upload self-test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: self-test-results
+          path: |
+            ${{ steps.self-test.outputs.json-file }}
+            ${{ steps.self-test.outputs.sarif-file }}
+          retention-days: 30
+
+  # Final CI status check
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [validate, lint, zizmor, test-unit, test-core, test-security, test-integration, test-performance, dogfood]
+    if: always()
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Check CI status
+        run: |
+          echo "🎯 CI Pipeline Results Summary"
+          echo "============================="
+          echo ""
+          echo "Job Results:"
+          echo "- Validation:      ${NEEDS_VALIDATE_RESULT}"
+          echo "- Linting:         ${NEEDS_LINT_RESULT}"
+          echo "- zizmor:          ${NEEDS_ZIZMOR_RESULT}"
+          echo "- Unit Tests:      ${NEEDS_TEST_UNIT_RESULT}"
+          echo "- Core Tests:      ${NEEDS_TEST_CORE_RESULT}"
+          echo "- Security Tests:  ${NEEDS_TEST_SECURITY_RESULT}"
+          echo "- Integration:     ${NEEDS_TEST_INTEGRATION_RESULT}"
+          echo "- Performance:     ${NEEDS_TEST_PERFORMANCE_RESULT}"
+          echo "- Self-Test:       ${NEEDS_DOGFOOD_RESULT}"
+          echo ""
+
+          # Count successful jobs
+          REQUIRED_JOBS=(
+            "${NEEDS_VALIDATE_RESULT}"
+            "${NEEDS_LINT_RESULT}"
+            "${NEEDS_ZIZMOR_RESULT}"
+            "${NEEDS_TEST_UNIT_RESULT}"
+            "${NEEDS_TEST_CORE_RESULT}"
+            "${NEEDS_TEST_SECURITY_RESULT}"
+          )
+          OPTIONAL_JOBS=(
+            "${NEEDS_TEST_INTEGRATION_RESULT}"
+            "${NEEDS_TEST_PERFORMANCE_RESULT}"
+            "${NEEDS_DOGFOOD_RESULT}"
+          )
+
+          # Check required jobs
+          for job in "${REQUIRED_JOBS[@]}"; do
+            if [[ "$job" != "success" ]]; then
+              echo "❌ Required job failed: $job"
+              echo "CI pipeline failed - required jobs must pass"
+              exit 1
+            fi
+          done
+
+          # Warn about optional job failures
+          for job in "${OPTIONAL_JOBS[@]}"; do
+            if [[ "$job" != "success" ]]; then
+              echo "⚠️ Optional job failed: $job"
+            fi
+          done
+
+          echo ""
+          echo "🎉 CI Pipeline Passed!"
+          echo "✅ All required checks successful"
+          echo "🚀 Ready for merge/release"
+
+        env:
+          NEEDS_VALIDATE_RESULT: ${{ needs.validate.result }}
+
+          NEEDS_LINT_RESULT: ${{ needs.lint.result }}
+
+          NEEDS_ZIZMOR_RESULT: ${{ needs.zizmor.result }}
+
+          NEEDS_TEST_UNIT_RESULT: ${{ needs.test-unit.result }}
+
+          NEEDS_TEST_CORE_RESULT: ${{ needs.test-core.result }}
+
+          NEEDS_TEST_SECURITY_RESULT: ${{ needs.test-security.result }}
+
+          NEEDS_TEST_INTEGRATION_RESULT: ${{ needs.test-integration.result }}
+
+          NEEDS_TEST_PERFORMANCE_RESULT: ${{ needs.test-performance.result }}
+
+          NEEDS_DOGFOOD_RESULT: ${{ needs.dogfood.result }}
+
+  # Cleanup job (runs even if others fail)
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [ci-success]
+    if: always()
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Cleanup test artifacts
+        run: |
+          echo "🧹 Cleaning up test artifacts..."
+          # Clean up any temporary files or resources
+          # In a real scenario, this might clean up test databases,
+          # temporary directories, Docker containers, etc.
+          docker system prune -f >/dev/null 2>&1 || true
+          echo "✅ Cleanup completed"

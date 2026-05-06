@@ -1,0 +1,861 @@
+# SPDX-License-Identifier: MIT
+---
+name: 'OpenGrep Security Scanner'
+description: >
+  Install and run OpenGrep for security scanning with security hardening
+author: 'AppSec Science LLC'
+
+inputs:
+  patterns:
+    description: >
+      Patterns to search for (space-separated list or path to rules
+      directory/file)
+    required: false
+    default: 'auto'
+  target:
+    description: 'Target directory or files to scan'
+    required: false
+    default: '.'
+  config:
+    description: 'Path to opengrep configuration file'
+    required: false
+  output-format:
+    description: 'Output format (json/sarif, json, sarif, text)'
+    required: false
+    default: 'json/sarif'
+  severity:
+    description: 'Minimum severity level (INFO, WARNING, ERROR)'
+    required: false
+  exclude:
+    description: 'Patterns to exclude from scanning'
+    required: false
+  include:
+    description: 'Patterns to include in scanning'
+    required: false
+  max-target-bytes:
+    description: 'Maximum target file size in bytes'
+    required: false
+  timeout:
+    description: 'Maximum time to spend on each rule'
+    required: false
+  jobs:
+    description: 'Number of parallel jobs'
+    required: false
+  verbose:
+    description: 'Enable verbose output'
+    required: false
+    default: 'false'
+  strict:
+    description: 'Return non-zero exit code on findings'
+    required: false
+    default: 'true'
+  baseline-commit:
+    description: 'Git ref or commit hash for differential scan'
+    required: false
+  output-file:
+    description: 'Path to output file'
+    required: false
+  enable-experimental:
+    description: 'Enable experimental features'
+    required: false
+    default: 'false'
+  dataflow-traces:
+    description: 'Enable dataflow traces'
+    required: false
+    default: 'false'
+  force-color:
+    description: 'Force colored output'
+    required: false
+    default: 'false'
+  exclude-minified-files:
+    description: 'Skip minified files'
+    required: false
+    default: 'false'
+  disable-version-check:
+    description: 'Disable version checking'
+    required: false
+    default: 'false'
+  opengrep-version:
+    description: >
+      OpenGrep version to install. Defaults to the action-pinned release.
+      Use an explicit version for reproducibility or latest to opt into the
+      newest upstream release at runtime.
+    required: false
+    default: '1.20.0'
+  opengrep-checksum:
+    description: >
+      Optional SHA256 checksum for opengrep-core_linux_x86.tar.gz. When empty,
+      the pinned default checksum is used for the default version; other
+      versions resolve the checksum from OpenGrep release metadata.
+    required: false
+  additional-safe-flags:
+    description: >
+      Additional safe flags (verified OpenGrep features):
+      --matching-explanations --output-enclosing-context etc.
+    required: false
+
+outputs:
+  results-file:
+    description: 'Path to the primary results file'
+    value: ${{ steps.scan.outputs.results-file }}
+  json-file:
+    description: 'Path to the JSON results file'
+    value: ${{ steps.scan.outputs.json-file }}
+  sarif-file:
+    description: 'Path to the SARIF results file'
+    value: ${{ steps.scan.outputs.sarif-file }}
+  findings-count:
+    description: 'Number of findings detected'
+    value: ${{ steps.scan.outputs.findings-count }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate Inputs
+      shell: bash
+      env:
+        INPUTS_TARGET: ${{ inputs.target }}
+        INPUTS_CONFIG: ${{ inputs.config }}
+        INPUTS_BASELINE_COMMIT: ${{ inputs.baseline-commit }}
+        INPUTS_OUTPUT_FILE: ${{ inputs.output-file }}
+        INPUTS_MAX_TARGET_BYTES: ${{ inputs.max-target-bytes }}
+        INPUTS_TIMEOUT: ${{ inputs.timeout }}
+        INPUTS_JOBS: ${{ inputs.jobs }}
+        INPUTS_OUTPUT_FORMAT: ${{ inputs.output-format }}
+        INPUTS_VERBOSE: ${{ inputs.verbose }}
+        INPUTS_STRICT: ${{ inputs.strict }}
+        INPUTS_ENABLE_EXPERIMENTAL: ${{ inputs.enable-experimental }}
+        INPUTS_DATAFLOW_TRACES: ${{ inputs.dataflow-traces }}
+        INPUTS_FORCE_COLOR: ${{ inputs.force-color }}
+        INPUTS_EXCLUDE_MINIFIED_FILES: ${{ inputs.exclude-minified-files }}
+        INPUTS_DISABLE_VERSION_CHECK: ${{ inputs.disable-version-check }}
+        INPUTS_SEVERITY: ${{ inputs.severity }}
+        INPUTS_OPENGREP_VERSION: ${{ inputs.opengrep-version }}
+        INPUTS_OPENGREP_CHECKSUM: ${{ inputs.opengrep-checksum }}
+        INPUTS_ADDITIONAL_SAFE_FLAGS: ${{ inputs.additional-safe-flags }}
+      run: |
+        set -euo pipefail
+
+        printf '\033[36mValidating inputs for security...\033[0m\n'
+
+        # Validators are defined once in scripts/validators.sh so they can
+        # be unit-tested outside the runner. They return 1 on failure;
+        # call sites below convert that to `exit 1`.
+        # shellcheck source=scripts/validators.sh
+        source "${GITHUB_ACTION_PATH}/scripts/validators.sh"
+
+        # Validate target path
+        if [ -n "${INPUTS_TARGET}" ]; then
+          validate_path "${INPUTS_TARGET}" || exit 1
+        fi
+
+        # Validate config path
+        if [ -n "${INPUTS_CONFIG}" ]; then
+          validate_path "${INPUTS_CONFIG}" || exit 1
+        fi
+
+        # Validate baseline git ref / commit
+        if [ -n "${INPUTS_BASELINE_COMMIT}" ]; then
+          validate_path "${INPUTS_BASELINE_COMMIT}" || exit 1
+        fi
+
+        # Validate output file path
+        if [ -n "${INPUTS_OUTPUT_FILE}" ]; then
+          validate_path "${INPUTS_OUTPUT_FILE}" || exit 1
+        fi
+
+        # Validate numeric inputs (empty values pass through unchanged)
+        validate_numeric "max-target-bytes" "${INPUTS_MAX_TARGET_BYTES}" || exit 1
+        validate_numeric "timeout" "${INPUTS_TIMEOUT}" || exit 1
+        validate_numeric "jobs" "${INPUTS_JOBS}" || exit 1
+
+        # Validate output format
+        validate_enum "output-format" "${INPUTS_OUTPUT_FORMAT}" \
+          "json/sarif" "json" "sarif" "text" || exit 1
+
+        # Validate boolean inputs (empty values pass through unchanged)
+        validate_boolean "verbose" "${INPUTS_VERBOSE}" || exit 1
+        validate_boolean "strict" "${INPUTS_STRICT}" || exit 1
+        validate_boolean "enable-experimental" "${INPUTS_ENABLE_EXPERIMENTAL}" || exit 1
+        validate_boolean "dataflow-traces" "${INPUTS_DATAFLOW_TRACES}" || exit 1
+        validate_boolean "force-color" "${INPUTS_FORCE_COLOR}" || exit 1
+        validate_boolean "exclude-minified-files" "${INPUTS_EXCLUDE_MINIFIED_FILES}" || exit 1
+        validate_boolean "disable-version-check" "${INPUTS_DISABLE_VERSION_CHECK}" || exit 1
+
+        # Validate OpenGrep install controls
+        validate_opengrep_version "${INPUTS_OPENGREP_VERSION}" || exit 1
+        validate_sha256 "opengrep-checksum" "${INPUTS_OPENGREP_CHECKSUM}" || exit 1
+
+        # Validate severity
+        if [ -n "${INPUTS_SEVERITY}" ]; then
+          validate_enum "severity" "${INPUTS_SEVERITY}" \
+            "INFO" "WARNING" "ERROR" || exit 1
+        fi
+
+        # Additional safe flags validation
+        if [ -n "${INPUTS_ADDITIONAL_SAFE_FLAGS}" ]; then
+          # Define allowed safe flags
+          safe_flags=(
+            "--matching-explanations"
+            "--output-enclosing-context"
+            "--enable-metrics"
+            "--disable-metrics"
+            "--max-memory"
+            "--optimizations"
+            "--no-rewrite-rule-ids"
+            "--rewrite-rule-ids"
+            "--legacy"
+            "--beta"
+            "--experimental"
+            "--debug"
+          )
+
+          # Flags that legitimately take a value (via --flag=value). All others
+          # must appear verbatim — prefix matching would admit e.g. --debug-evil.
+          value_flags=("--max-memory")
+
+          # Parse and validate each flag
+          IFS=' ' read -ra ADDR <<< "${INPUTS_ADDITIONAL_SAFE_FLAGS}"
+          for flag in "${ADDR[@]}"; do
+            flag_key="${flag%%=*}"
+            has_value=false
+            [ "$flag_key" != "$flag" ] && has_value=true
+
+            flag_found=false
+            for safe_flag in "${safe_flags[@]}"; do
+              if [ "$flag_key" = "$safe_flag" ]; then
+                if [ "$has_value" = true ]; then
+                  for value_flag in "${value_flags[@]}"; do
+                    if [ "$flag_key" = "$value_flag" ]; then
+                      flag_found=true
+                      break
+                    fi
+                  done
+                else
+                  flag_found=true
+                fi
+                break
+              fi
+            done
+
+            if [ "$flag_found" = false ]; then
+              printf 'Error: Unsafe or unknown flag: %s\n' "$flag"
+              exit 1
+            fi
+          done
+
+          # Check for conflicting flags
+          if [[ "${INPUTS_ADDITIONAL_SAFE_FLAGS}" == *"--debug"* ]] && [ "${INPUTS_VERBOSE}" = "true" ]; then
+            printf 'Error: --debug and --verbose are mutually exclusive\n'
+            exit 1
+          fi
+        fi
+
+        printf '✅ All inputs validated successfully\n'
+
+    - name: Security Environment Setup
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        printf '\033[36mSetting up secure environment...\033[0m\n'
+
+        # Set secure umask
+        umask 022
+
+        # Disable core dumps for security
+        ulimit -c 0
+
+        # Clear potentially dangerous environment variables
+        unset LD_PRELOAD
+        unset LD_LIBRARY_PATH
+        unset DYLD_LIBRARY_PATH
+        unset PYTHONPATH
+
+        # Set secure PATH
+        export PATH="/usr/local/bin:/usr/bin:/bin"
+
+        printf '✅ Secure environment configured\n'
+
+    - name: Install OpenGrep
+      id: install
+      shell: bash
+      env:
+        INPUTS_OPENGREP_VERSION: ${{ inputs.opengrep-version }}
+        INPUTS_OPENGREP_CHECKSUM: ${{ inputs.opengrep-checksum }}
+      run: |
+        set -euo pipefail
+
+        printf '\033[36mInstalling OpenGrep...\033[0m\n'
+
+        # Create secure temporary directory
+        TEMP_DIR=$(mktemp -d -t opengrep-install-XXXXXXXXXX)
+        trap 'rm -rf "$TEMP_DIR"' EXIT
+
+        cd "$TEMP_DIR"
+
+        # Download with integrity verification
+        DEFAULT_OPENGREP_VERSION="1.20.0"
+        DEFAULT_EXPECTED_SHA256="312b705c0011c15303b45ea19242a0df7452a02129dddb89c1a21190ae67410b"
+        ASSET_NAME="opengrep-core_linux_x86.tar.gz"
+        OPENGREP_VERSION="${INPUTS_OPENGREP_VERSION:-$DEFAULT_OPENGREP_VERSION}"
+        EXPECTED_SHA256="${INPUTS_OPENGREP_CHECKSUM}"
+        DOWNLOAD_URL=""
+
+        if [ "$OPENGREP_VERSION" = "latest" ]; then
+          RELEASE_API_URL="https://api.github.com/repos/opengrep/opengrep/releases/latest"
+          printf 'Warning: OpenGrep version "latest" is non-reproducible and may change between workflow runs.\n' >&2
+        else
+          OPENGREP_VERSION="${OPENGREP_VERSION#v}"
+          RELEASE_API_URL="https://api.github.com/repos/opengrep/opengrep/releases/tags/v$OPENGREP_VERSION"
+        fi
+
+        if [ -z "$EXPECTED_SHA256" ] && [ "$OPENGREP_VERSION" = "$DEFAULT_OPENGREP_VERSION" ]; then
+          EXPECTED_SHA256="$DEFAULT_EXPECTED_SHA256"
+        fi
+
+        if [ -z "$EXPECTED_SHA256" ] || [ "$OPENGREP_VERSION" = "latest" ]; then
+          if ! command -v jq >/dev/null; then
+            printf 'Error: jq is required to resolve OpenGrep release metadata\n' >&2
+            exit 1
+          fi
+
+          printf 'Resolving OpenGrep release metadata...\n'
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -o release.json \
+            "$RELEASE_API_URL"
+
+          RESOLVED_VERSION=$(jq -r '.tag_name // empty' release.json)
+          DOWNLOAD_URL=$(jq -r \
+            --arg asset "$ASSET_NAME" \
+            '.assets[] | select(.name == $asset) | .browser_download_url' \
+            release.json)
+
+          if [ -z "$RESOLVED_VERSION" ] || [ -z "$DOWNLOAD_URL" ]; then
+            printf 'Error: Unable to resolve OpenGrep release asset: %s\n' "$ASSET_NAME" >&2
+            exit 1
+          fi
+
+          OPENGREP_VERSION="${RESOLVED_VERSION#v}"
+
+          if [ -z "$EXPECTED_SHA256" ]; then
+            EXPECTED_SHA256=$(jq -r \
+              --arg asset "$ASSET_NAME" \
+              '.assets[] | select(.name == $asset) | (.digest // "") | sub("^sha256:"; "")' \
+              release.json)
+
+            if [ -z "$EXPECTED_SHA256" ] || ! [[ "$EXPECTED_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+              printf 'Error: Unable to resolve SHA256 checksum for %s\n' "$ASSET_NAME" >&2
+              exit 1
+            fi
+          fi
+        fi
+
+        if [ -z "$DOWNLOAD_URL" ]; then
+          DOWNLOAD_URL="https://github.com/opengrep/opengrep/releases/download/v$OPENGREP_VERSION/$ASSET_NAME"
+        fi
+
+        printf 'Downloading OpenGrep v%s...\n' "$OPENGREP_VERSION"
+        curl -fsSL -o opengrep.tar.gz "$DOWNLOAD_URL"
+
+        # Verify checksum - fail hard if no tool is available
+        printf 'Verifying download integrity...\n'
+        if command -v sha256sum >/dev/null; then
+          printf '%s  opengrep.tar.gz\n' "$EXPECTED_SHA256" | sha256sum -c -
+        elif command -v shasum >/dev/null; then
+          printf '%s  opengrep.tar.gz\n' "$EXPECTED_SHA256" | shasum -a 256 -c -
+        else
+          printf 'Error: No SHA256 tool available - cannot verify download integrity\n' >&2
+          exit 1
+        fi
+
+        # Extract with safety checks
+        printf 'Extracting OpenGrep...\n'
+        tar -xzf opengrep.tar.gz --no-same-owner --no-same-permissions
+
+        # Install to a runner-writable location and expose it to later steps.
+        INSTALL_ROOT="${RUNNER_TEMP:-${GITHUB_WORKSPACE:-}}"
+        if [ -z "$INSTALL_ROOT" ]; then
+          printf 'Error: RUNNER_TEMP or GITHUB_WORKSPACE is required for installation\n' >&2
+          exit 1
+        fi
+        case "$INSTALL_ROOT" in
+          /*) ;;
+          *)
+            printf 'Error: install root must be an absolute path\n' >&2
+            exit 1
+            ;;
+        esac
+        INSTALL_DIR="$INSTALL_ROOT/opengrep/bin"
+        mkdir -p "$INSTALL_DIR"
+        install -m 755 opengrep-core "$INSTALL_DIR/opengrep"
+        printf 'opengrep-bin=%s\n' "$INSTALL_DIR/opengrep" >> "$GITHUB_OUTPUT"
+
+        # Verify installation
+        "$INSTALL_DIR/opengrep" --version
+
+        printf '✅ OpenGrep installed successfully\n'
+
+    - name: Prepare Scan Configuration
+      id: config
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        printf '\033[36mPreparing scan configuration...\033[0m\n'
+
+        # Set up output directory with proper permissions
+        OUTPUT_DIR="$GITHUB_WORKSPACE/opengrep-results"
+        mkdir -p "$OUTPUT_DIR"
+
+        # Ensure the output directory is writable by the current user
+        # This helps with Docker environments where permissions can be mixed
+        chmod 755 "$OUTPUT_DIR"
+
+        # Create a temporary file to test write permissions
+        if ! touch "$OUTPUT_DIR/.write_test" 2>/dev/null; then
+          printf '❌ Warning: Cannot write to output directory %s\n' "$OUTPUT_DIR"
+          printf 'This may cause scan failures when creating output files.\n'
+          # Try to fix permissions if we have sudo access (in container environments)
+          if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            printf 'Attempting to fix directory permissions...\n'
+            sudo chown -R "$(id -u):$(id -g)" "$OUTPUT_DIR" 2>/dev/null || true
+            sudo chmod -R 755 "$OUTPUT_DIR" 2>/dev/null || true
+          fi
+        else
+          rm -f "$OUTPUT_DIR/.write_test"
+        fi
+
+        # Determine output files based on format and user-specified output file
+        CUSTOM_OUTPUT_FILE=""
+        if [ -n "${INPUTS_OUTPUT_FILE}" ]; then
+          # User specified a custom output file
+          if [[ "${INPUTS_OUTPUT_FILE}" == /* ]]; then
+            # Absolute path
+            CUSTOM_OUTPUT_FILE="${INPUTS_OUTPUT_FILE}"
+          else
+            # Relative path - make it relative to output directory
+            CUSTOM_OUTPUT_FILE="$OUTPUT_DIR/${INPUTS_OUTPUT_FILE}"
+          fi
+        fi
+
+        case "${INPUTS_OUTPUT_FORMAT}" in
+          "json/sarif")
+            if [ -n "$CUSTOM_OUTPUT_FILE" ]; then
+              JSON_FILE="$CUSTOM_OUTPUT_FILE"
+              SARIF_FILE="${CUSTOM_OUTPUT_FILE%.*}.sarif"
+            else
+              JSON_FILE="$OUTPUT_DIR/opengrep-results.json"
+              SARIF_FILE="$OUTPUT_DIR/opengrep-results.sarif"
+            fi
+            RESULTS_FILE="$JSON_FILE"
+            ;;
+          "json")
+            if [ -n "$CUSTOM_OUTPUT_FILE" ]; then
+              JSON_FILE="$CUSTOM_OUTPUT_FILE"
+            else
+              JSON_FILE="$OUTPUT_DIR/opengrep-results.json"
+            fi
+            SARIF_FILE=""
+            RESULTS_FILE="$JSON_FILE"
+            ;;
+          "sarif")
+            JSON_FILE=""
+            if [ -n "$CUSTOM_OUTPUT_FILE" ]; then
+              SARIF_FILE="$CUSTOM_OUTPUT_FILE"
+            else
+              SARIF_FILE="$OUTPUT_DIR/opengrep-results.sarif"
+            fi
+            RESULTS_FILE="$SARIF_FILE"
+            ;;
+          "text")
+            JSON_FILE=""
+            SARIF_FILE=""
+            if [ -n "$CUSTOM_OUTPUT_FILE" ]; then
+              RESULTS_FILE="$CUSTOM_OUTPUT_FILE"
+            else
+              RESULTS_FILE="$OUTPUT_DIR/opengrep-results.txt"
+            fi
+            ;;
+        esac
+
+        # Set outputs
+        printf 'results-file=%s\n' "$RESULTS_FILE" >> "$GITHUB_OUTPUT"
+        printf 'json-file=%s\n' "$JSON_FILE" >> "$GITHUB_OUTPUT"
+        printf 'sarif-file=%s\n' "$SARIF_FILE" >> "$GITHUB_OUTPUT"
+        printf 'output-dir=%s\n' "$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+
+        # Prepare command arguments
+        OPENGREP_ARGS=()
+
+        # Add patterns/rules. Track whether `patterns` already provided a
+        # --config so we can detect conflicts with the separate `config` input.
+        PATTERNS_IS_CONFIG=false
+        if [ "${INPUTS_PATTERNS}" = "auto" ]; then
+          # Use default security rules
+          OPENGREP_ARGS+=("--config=auto")
+          PATTERNS_IS_CONFIG=true
+        elif [ -f "${INPUTS_PATTERNS}" ] || [ -d "${INPUTS_PATTERNS}" ]; then
+          OPENGREP_ARGS+=("--config=${INPUTS_PATTERNS}")
+          PATTERNS_IS_CONFIG=true
+        else
+          # Treat as pattern string
+          OPENGREP_ARGS+=("--pattern=${INPUTS_PATTERNS}")
+        fi
+
+        # Add configuration file if specified. Reject the combination where
+        # `patterns` already resolved to a --config source — two conflicting
+        # --config flags produce undefined behaviour for the caller.
+        if [ -n "${INPUTS_CONFIG}" ]; then
+          if [ "$PATTERNS_IS_CONFIG" = "true" ]; then
+            printf 'Error: `config` was provided alongside a `patterns` value that resolves to a '
+            printf 'config source (%s). Pass only one.\n' \
+              "${INPUTS_PATTERNS}" >&2
+            exit 1
+          fi
+          OPENGREP_ARGS+=("--config=${INPUTS_CONFIG}")
+        fi
+
+        # Add severity filter
+        if [ -n "${INPUTS_SEVERITY}" ]; then
+          OPENGREP_ARGS+=("--severity=${INPUTS_SEVERITY}")
+        fi
+
+        # Validate + split helpers are shared by include and exclude.
+        if [ -n "${INPUTS_EXCLUDE}" ] || [ -n "${INPUTS_INCLUDE}" ]; then
+          # shellcheck source=scripts/validators.sh
+          source "${GITHUB_ACTION_PATH}/scripts/validators.sh"
+        fi
+
+        # Add exclusion patterns (same charset/length rules as include)
+        if [ -n "${INPUTS_EXCLUDE}" ]; then
+          IFS=' ' read -ra EXCLUDE_PATTERNS <<< "${INPUTS_EXCLUDE}"
+          for exc in "${EXCLUDE_PATTERNS[@]}"; do
+            if ! validate_include_pattern "$exc"; then
+              exit 1
+            fi
+            OPENGREP_ARGS+=("--exclude=$exc")
+          done
+        fi
+
+        # Add inclusion patterns (secure handling: validate + split)
+        if [ -n "${INPUTS_INCLUDE}" ]; then
+          # Split on IFS (space/tab/newline) -> multiple patterns supported.
+          IFS=' ' read -ra INCLUDE_PATTERNS <<< "${INPUTS_INCLUDE}"
+          for inc in "${INCLUDE_PATTERNS[@]}"; do
+            if ! validate_include_pattern "$inc"; then
+              exit 1
+            fi
+            OPENGREP_ARGS+=("--include=$inc")
+          done
+        fi
+
+        # Add numeric parameters
+        if [ -n "${INPUTS_MAX_TARGET_BYTES}" ]; then
+          OPENGREP_ARGS+=("--max-target-bytes=${INPUTS_MAX_TARGET_BYTES}")
+        fi
+
+        if [ -n "${INPUTS_TIMEOUT}" ]; then
+          OPENGREP_ARGS+=("--timeout=${INPUTS_TIMEOUT}")
+        fi
+
+        if [ -n "${INPUTS_JOBS}" ]; then
+          OPENGREP_ARGS+=("--jobs=${INPUTS_JOBS}")
+        fi
+
+        # Add boolean flags
+        if [ "${INPUTS_VERBOSE}" = "true" ]; then
+          OPENGREP_ARGS+=("--verbose")
+        fi
+
+        if [ "${INPUTS_ENABLE_EXPERIMENTAL}" = "true" ]; then
+          OPENGREP_ARGS+=("--experimental")
+        fi
+
+        if [ "${INPUTS_DATAFLOW_TRACES}" = "true" ]; then
+          OPENGREP_ARGS+=("--dataflow-traces")
+        fi
+
+        if [ "${INPUTS_FORCE_COLOR}" = "true" ]; then
+          OPENGREP_ARGS+=("--force-color")
+        fi
+
+        if [ "${INPUTS_EXCLUDE_MINIFIED_FILES}" = "true" ]; then
+          OPENGREP_ARGS+=("--exclude-minified-files")
+        fi
+
+        if [ "${INPUTS_DISABLE_VERSION_CHECK}" = "true" ]; then
+          OPENGREP_ARGS+=("--disable-version-check")
+        fi
+
+        # Add baseline commit if specified
+        if [ -n "${INPUTS_BASELINE_COMMIT}" ]; then
+          OPENGREP_ARGS+=("--baseline-commit=${INPUTS_BASELINE_COMMIT}")
+        fi
+
+        # Add additional safe flags
+        if [ -n "${INPUTS_ADDITIONAL_SAFE_FLAGS}" ]; then
+          IFS=' ' read -ra ADDR <<< "${INPUTS_ADDITIONAL_SAFE_FLAGS}"
+          for flag in "${ADDR[@]}"; do
+            OPENGREP_ARGS+=("$flag")
+          done
+        fi
+
+        # Save arguments for next step
+        printf '%s\n' "${OPENGREP_ARGS[@]}" > "$OUTPUT_DIR/opengrep-args.txt"
+
+        printf '✅ Scan configuration prepared\n'
+      env:
+        INPUTS_OUTPUT_FILE: ${{ inputs.output-file }}
+        INPUTS_OUTPUT_FORMAT: ${{ inputs.output-format }}
+        INPUTS_PATTERNS: ${{ inputs.patterns }}
+        INPUTS_CONFIG: ${{ inputs.config }}
+        INPUTS_SEVERITY: ${{ inputs.severity }}
+        INPUTS_EXCLUDE: ${{ inputs.exclude }}
+        INPUTS_INCLUDE: ${{ inputs.include }}
+        INPUTS_MAX_TARGET_BYTES: ${{ inputs.max-target-bytes }}
+        INPUTS_TIMEOUT: ${{ inputs.timeout }}
+        INPUTS_JOBS: ${{ inputs.jobs }}
+        INPUTS_VERBOSE: ${{ inputs.verbose }}
+        INPUTS_ENABLE_EXPERIMENTAL: ${{ inputs.enable-experimental }}
+        INPUTS_DATAFLOW_TRACES: ${{ inputs.dataflow-traces }}
+        INPUTS_FORCE_COLOR: ${{ inputs.force-color }}
+        INPUTS_EXCLUDE_MINIFIED_FILES: ${{ inputs.exclude-minified-files }}
+        INPUTS_DISABLE_VERSION_CHECK: ${{ inputs.disable-version-check }}
+        INPUTS_BASELINE_COMMIT: ${{ inputs.baseline-commit }}
+        INPUTS_ADDITIONAL_SAFE_FLAGS: ${{ inputs.additional-safe-flags }}
+
+    - name: Run OpenGrep Scan
+      id: scan
+      shell: bash
+      env:
+        STEPS_CONFIG_OUTPUTS_OUTPUT_DIR: ${{ steps.config.outputs.output-dir }}
+        STEPS_CONFIG_OUTPUTS_JSON_FILE: ${{ steps.config.outputs.json-file }}
+        STEPS_CONFIG_OUTPUTS_SARIF_FILE: ${{ steps.config.outputs.sarif-file }}
+        STEPS_CONFIG_OUTPUTS_RESULTS_FILE: ${{ steps.config.outputs.results-file }}
+        STEPS_INSTALL_OUTPUTS_OPENGREP_BIN: ${{ steps.install.outputs.opengrep-bin }}
+        INPUTS_OUTPUT_FORMAT: ${{ inputs.output-format }}
+        INPUTS_TARGET: ${{ inputs.target }}
+        INPUTS_STRICT: ${{ inputs.strict }}
+      run: |
+        set -euo pipefail
+
+        printf '\033[36mRunning OpenGrep security scan...\033[0m\n'
+
+        OUTPUT_DIR="${STEPS_CONFIG_OUTPUTS_OUTPUT_DIR:-}"
+        JSON_FILE="${STEPS_CONFIG_OUTPUTS_JSON_FILE}"
+        SARIF_FILE="${STEPS_CONFIG_OUTPUTS_SARIF_FILE}"
+        RESULTS_FILE="${STEPS_CONFIG_OUTPUTS_RESULTS_FILE}"
+        OPENGREP_BIN="${STEPS_INSTALL_OUTPUTS_OPENGREP_BIN}"
+        if [ ! -x "$OPENGREP_BIN" ]; then
+          printf 'Error: OpenGrep binary is missing or not executable: %s\n' "$OPENGREP_BIN" >&2
+          exit 1
+        fi
+
+        # Read prepared arguments
+        mapfile -t OPENGREP_ARGS < "$OUTPUT_DIR/opengrep-args.txt"
+
+        # Remove stale outputs from prior runs before invoking OpenGrep.
+        rm -f "$RESULTS_FILE" "$JSON_FILE" "$SARIF_FILE"
+        rm -f "opengrep-results.json" "opengrep-results.sarif"
+
+        # Determine output format flags
+        SCAN_EXIT_CODE=0
+        JSON_STDOUT_CAPTURE=""
+        SARIF_STDOUT_CAPTURE=""
+        TEXT_STDOUT_CAPTURE=""
+
+        if [ "${INPUTS_OUTPUT_FORMAT}" != "text" ] && ! command -v jq >/dev/null; then
+          printf 'Error: jq is required to validate and summarize structured OpenGrep output\n' >&2
+          exit 1
+        fi
+
+        # Use the manually installed opengrep binary for all environments
+        case "${INPUTS_OUTPUT_FORMAT}" in
+          "json/sarif")
+            # Run twice for both formats
+            printf 'Generating JSON results...\n'
+            JSON_STDOUT_CAPTURE=$(mktemp "$OUTPUT_DIR/opengrep-json-stdout.XXXXXX")
+            "$OPENGREP_BIN" "${OPENGREP_ARGS[@]}" --json \
+              --json-output="$JSON_FILE" \
+              "${INPUTS_TARGET}" >"$JSON_STDOUT_CAPTURE" || SCAN_EXIT_CODE=$?
+
+            printf 'Generating SARIF results...\n'
+            SARIF_STDOUT_CAPTURE=$(mktemp "$OUTPUT_DIR/opengrep-sarif-stdout.XXXXXX")
+            "$OPENGREP_BIN" "${OPENGREP_ARGS[@]}" --sarif \
+              --sarif-output="$SARIF_FILE" \
+              "${INPUTS_TARGET}" >"$SARIF_STDOUT_CAPTURE" || SCAN_EXIT_CODE=$?
+            ;;
+          "json")
+            JSON_STDOUT_CAPTURE=$(mktemp "$OUTPUT_DIR/opengrep-json-stdout.XXXXXX")
+            "$OPENGREP_BIN" "${OPENGREP_ARGS[@]}" --json \
+              --json-output="$JSON_FILE" \
+              "${INPUTS_TARGET}" >"$JSON_STDOUT_CAPTURE" || SCAN_EXIT_CODE=$?
+            ;;
+          "sarif")
+            SARIF_STDOUT_CAPTURE=$(mktemp "$OUTPUT_DIR/opengrep-sarif-stdout.XXXXXX")
+            "$OPENGREP_BIN" "${OPENGREP_ARGS[@]}" --sarif \
+              --sarif-output="$SARIF_FILE" \
+              "${INPUTS_TARGET}" >"$SARIF_STDOUT_CAPTURE" || SCAN_EXIT_CODE=$?
+            ;;
+          "text")
+            TEXT_STDOUT_CAPTURE=$(mktemp "$OUTPUT_DIR/opengrep-text-stdout.XXXXXX")
+            "$OPENGREP_BIN" "${OPENGREP_ARGS[@]}" --text \
+              --text-output="$RESULTS_FILE" \
+              "${INPUTS_TARGET}" >"$TEXT_STDOUT_CAPTURE" || SCAN_EXIT_CODE=$?
+            ;;
+        esac
+
+        # Check if scan completed successfully
+        if [ "$SCAN_EXIT_CODE" -ne 0 ]; then
+          printf '❌ OpenGrep scan failed with exit code: %s\n' "$SCAN_EXIT_CODE"
+          exit $SCAN_EXIT_CODE
+        fi
+
+        # Workaround: Move files if OpenGrep created them in current directory
+        for file in "opengrep-results.json" "opengrep-results.sarif"; do
+          if [ -f "$file" ]; then
+            case "$file" in
+              "opengrep-results.json")
+                if [ -n "$JSON_FILE" ]; then
+                  mv -f "$file" "$JSON_FILE"
+                  printf 'Moved %s to %s\n' "$file" "$JSON_FILE"
+                fi
+                ;;
+              "opengrep-results.sarif")
+                if [ -n "$SARIF_FILE" ]; then
+                  mv -f "$file" "$SARIF_FILE"
+                  printf 'Moved %s to %s\n' "$file" "$SARIF_FILE"
+                fi
+                ;;
+            esac
+          fi
+        done
+
+        # Fallback: some differential scans emit structured output to stdout
+        # without creating the requested file path.
+        if [ -n "$JSON_FILE" ] && [ ! -f "$JSON_FILE" ] \
+          && [ -n "$JSON_STDOUT_CAPTURE" ] && [ -s "$JSON_STDOUT_CAPTURE" ] \
+          && jq empty "$JSON_STDOUT_CAPTURE" >/dev/null 2>&1; then
+          mv -f "$JSON_STDOUT_CAPTURE" "$JSON_FILE"
+          printf 'Captured JSON stdout to %s\n' "$JSON_FILE"
+        fi
+        if [ -n "$SARIF_FILE" ] && [ ! -f "$SARIF_FILE" ] \
+          && [ -n "$SARIF_STDOUT_CAPTURE" ] && [ -s "$SARIF_STDOUT_CAPTURE" ] \
+          && jq empty "$SARIF_STDOUT_CAPTURE" >/dev/null 2>&1; then
+          mv -f "$SARIF_STDOUT_CAPTURE" "$SARIF_FILE"
+          printf 'Captured SARIF stdout to %s\n' "$SARIF_FILE"
+        fi
+        if [ "${INPUTS_OUTPUT_FORMAT}" = "text" ] && [ ! -f "$RESULTS_FILE" ] \
+          && [ -n "$TEXT_STDOUT_CAPTURE" ] && [ -s "$TEXT_STDOUT_CAPTURE" ]; then
+          mv -f "$TEXT_STDOUT_CAPTURE" "$RESULTS_FILE"
+          printf 'Captured text stdout to %s\n' "$RESULTS_FILE"
+        fi
+        rm -f "$JSON_STDOUT_CAPTURE" "$SARIF_STDOUT_CAPTURE" "$TEXT_STDOUT_CAPTURE"
+
+        # Validate expected output files were created
+        case "${INPUTS_OUTPUT_FORMAT}" in
+          "json/sarif")
+            if [ ! -f "$JSON_FILE" ]; then
+              printf '❌ JSON output file not created: %s\n' "$JSON_FILE"
+              exit 1
+            fi
+            if [ ! -f "$SARIF_FILE" ]; then
+              printf '❌ SARIF output file not created: %s\n' "$SARIF_FILE"
+              exit 1
+            fi
+            ;;
+          "json")
+            if [ ! -f "$JSON_FILE" ]; then
+              printf '❌ JSON output file not created: %s\n' "$JSON_FILE"
+              exit 1
+            fi
+            ;;
+          "sarif")
+            if [ ! -f "$SARIF_FILE" ]; then
+              printf '❌ SARIF output file not created: %s\n' "$SARIF_FILE"
+              exit 1
+            fi
+            ;;
+          "text")
+            if [ ! -f "$RESULTS_FILE" ]; then
+              printf '❌ Text output file not created: %s\n' "$RESULTS_FILE"
+              exit 1
+            fi
+            ;;
+        esac
+
+        # Count findings
+        FINDINGS_COUNT=0
+        count_findings() {
+          local file="$1"
+          local query="$2"
+          local count
+
+          count=$(jq -r "$query" "$file" 2>/dev/null || printf '0')
+          if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+            count=0
+          fi
+          printf '%s\n' "$count"
+        }
+
+        if [ -n "$JSON_FILE" ] && [ -f "$JSON_FILE" ]; then
+          FINDINGS_COUNT=$(count_findings "$JSON_FILE" '(.results // []) | length')
+        elif [ -n "$SARIF_FILE" ] && [ -f "$SARIF_FILE" ]; then
+          FINDINGS_COUNT=$(count_findings "$SARIF_FILE" '(.runs[0].results // []) | length')
+        fi
+
+        # Set outputs
+        printf 'results-file=%s\n' "$RESULTS_FILE" >> "$GITHUB_OUTPUT"
+        printf 'json-file=%s\n' "$JSON_FILE" >> "$GITHUB_OUTPUT"
+        printf 'sarif-file=%s\n' "$SARIF_FILE" >> "$GITHUB_OUTPUT"
+        printf 'findings-count=%s\n' "$FINDINGS_COUNT" >> "$GITHUB_OUTPUT"
+
+        printf '✅ OpenGrep scan completed\n'
+        printf '📊 Findings detected: %s\n' "$FINDINGS_COUNT"
+
+        # Handle strict mode
+        strict_mode="${INPUTS_STRICT}"
+        if [ "$strict_mode" = "true" ] && [ "$FINDINGS_COUNT" -gt 0 ]; then
+          printf '❌ Scan found %s security issues (strict mode)\n' "$FINDINGS_COUNT"
+          exit 1
+        fi
+
+    - name: Report Results
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        printf '\033[36mProcessing scan results...\033[0m\n'
+
+        OUTPUT_DIR="${STEPS_CONFIG_OUTPUTS_OUTPUT_DIR:-}"
+        FINDINGS_COUNT="${STEPS_SCAN_OUTPUTS_FINDINGS_COUNT:-0}"
+        if [[ ! "$FINDINGS_COUNT" =~ ^[0-9]+$ ]]; then
+          FINDINGS_COUNT=0
+        fi
+
+        # Display summary
+        if [ "$FINDINGS_COUNT" -eq 0 ]; then
+          printf '✅ No security issues found\n'
+        else
+          printf '⚠️  Found %s security issues\n' "$FINDINGS_COUNT"
+
+          # Show first few findings if JSON available
+          JSON_FILE="${STEPS_SCAN_OUTPUTS_JSON_FILE:-}"
+          if [ -n "$JSON_FILE" ] && [ -f "$JSON_FILE" ] && command -v jq >/dev/null; then
+            printf '📋 Sample findings:\n'
+            jq -r '.results[:3] | .[] | "- \(.check_id): \(.message)"' \
+              "$JSON_FILE" 2>/dev/null || true
+          fi
+        fi
+
+        # Set up for artifact upload
+        printf 'results-ready=true\n' >> "$GITHUB_OUTPUT"
+
+        printf '✅ Results processed successfully\n'
+
+      env:
+        STEPS_CONFIG_OUTPUTS_OUTPUT_DIR: ${{ steps.config.outputs.output-dir }}
+        STEPS_SCAN_OUTPUTS_FINDINGS_COUNT: ${{ steps.scan.outputs.findings-count }}
+        STEPS_SCAN_OUTPUTS_JSON_FILE: ${{ steps.scan.outputs.json-file }}

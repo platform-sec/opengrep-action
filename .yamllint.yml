@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MIT
+
+extends: default
+rules:
+  line-length:
+    max: 120
+  truthy: disable
+  comments:
+    min-spaces-from-content: 1

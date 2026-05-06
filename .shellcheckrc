@@ -1,0 +1,21 @@
+# ShellCheck configuration file
+# This file suppresses specific ShellCheck warnings that are either:
+# 1. False positives (e.g., variables in quoted heredocs)
+# 2. Style preferences that don't affect functionality
+# 3. Low-priority suggestions that don't impact security or correctness
+
+# SC2086: Double quote to prevent globbing and word splitting
+# - Disabled for cases where variables are in quoted heredocs (false positives)
+# - These occur in pre-release.yml where git log commands are inside 'EOF' heredoc
+disable=SC2086
+
+# SC2129: Consider using { cmd1; cmd2; } >> file instead of individual redirects
+# - This is a style preference, not a functional issue
+# - Individual redirects are more readable and equally correct
+disable=SC2129
+
+# SC2001: See if you can use ${variable//search/replace} instead
+# - This suggests bash parameter expansion over sed
+# - Using sed is perfectly valid and sometimes more readable
+# - This is an optimization suggestion, not a correctness issue
+disable=SC2001

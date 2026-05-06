@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+
+rules:
+  - id: test-eval
+    pattern: eval($EXPR)
+    message: "eval() detected"
+    languages: [javascript]
+    severity: ERROR
+
+  - id: test-os-system
+    pattern: os.system($CMD)
+    message: "os.system() detected"
+    languages: [python]
+    severity: ERROR

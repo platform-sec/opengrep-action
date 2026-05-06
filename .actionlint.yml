@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT
+
+shellcheck:
+  # Disable SC2086: Double quote to prevent globbing and word splitting
+  # These are false positives in quoted heredocs and acceptable usage
+  enable-all-rules: false
+  exclude-ids:
+    - SC2086
+    - SC2129  # Style preference for grouped redirects
+    - SC2001  # Style preference for bash vs sed

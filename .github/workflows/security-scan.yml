@@ -1,0 +1,305 @@
+# SPDX-License-Identifier: MIT
+---
+# Example workflow using the OpenGrep action
+
+name: Security Scan with OpenGrep
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  security-scan:
+    name: OpenGrep Security Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      # Default json/sarif output scan (JSON + SARIF)
+      - name: Run OpenGrep Dual Output Scan
+        id: dual-scan
+        uses: ./  # Use local action, or replace with platform-sec/opengrep-action@LATEST_SHA256_HASH
+        continue-on-error: true  # Findings are reported below without failing the workflow
+        with:
+          target: '.'
+          # output-format: 'json/sarif' is the default, produces both JSON and SARIF
+          strict: 'true'
+
+      # Use the JSON output for custom processing
+      - name: Process JSON Results
+        if: always()
+        run: |
+          JSON_FILE="${STEPS_DUAL_SCAN_OUTPUTS_JSON_FILE}"
+          if [ -f "$JSON_FILE" ]; then
+            echo "Processing JSON results from: $JSON_FILE"
+            FINDINGS_COUNT=$(jq '.results | length' "$JSON_FILE")
+            echo "Found $FINDINGS_COUNT issues"
+
+            # Example: Extract high-severity findings
+            jq '.results[] | select(.extra.severity == "ERROR")' "$JSON_FILE" > high-severity.json
+          fi
+        env:
+          STEPS_DUAL_SCAN_OUTPUTS_JSON_FILE: ${{ steps.dual-scan.outputs.json-file }}
+
+      - name: Validate Dual Output Files
+        if: always()
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_valid_json_file "${STEPS_DUAL_SCAN_OUTPUTS_JSON_FILE}"
+          assert_valid_sarif_file "${STEPS_DUAL_SCAN_OUTPUTS_SARIF_FILE}"
+        env:
+          STEPS_DUAL_SCAN_OUTPUTS_JSON_FILE: ${{ steps.dual-scan.outputs.json-file }}
+          STEPS_DUAL_SCAN_OUTPUTS_SARIF_FILE: ${{ steps.dual-scan.outputs.sarif-file }}
+
+      # Upload both files as artifacts (optional)
+      - name: Upload Scan Results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: opengrep-results
+          path: |
+            ${{ steps.dual-scan.outputs.json-file }}
+            ${{ steps.dual-scan.outputs.sarif-file }}
+          retention-days: 30
+
+      # Single format scan with verified OpenGrep features
+      - name: Run OpenGrep Single Format Scan with Verified Features
+        id: single-scan
+        uses: ./  # Use local action, or replace with platform-sec/opengrep-action@LATEST_SHA256_HASH
+        with:
+          patterns: 'auto'  # Use the curated default rule set
+          target: '.'
+          output-format: 'sarif'  # Override default json/sarif output
+          severity: 'WARNING'
+          exclude: '*.test.js,*.spec.js'
+          verbose: 'true'
+          jobs: '4'
+          output-file: 'security-results.sarif'
+          # Verified OpenGrep options (no Semgrep Pro dependencies)
+          enable-experimental: 'true'
+          dataflow-traces: 'true'
+          exclude-minified-files: 'true'
+          additional-safe-flags: '--matching-explanations --output-enclosing-context'
+        continue-on-error: true  # Don't fail the workflow if issues are found
+
+      # Example of conditional upload (only on main branch)
+      - name: Upload Security Results (Main Branch Only)
+        if: always() && github.ref == 'refs/heads/main' && steps.single-scan.outputs.results-file != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: security-scan-main
+          path: ${{ steps.single-scan.outputs.results-file }}
+          retention-days: 90  # Keep main branch results longer
+
+      # Scan with custom rules file
+      - name: Run OpenGrep with Custom Rules
+        uses: ./  # Use local action, or replace with platform-sec/opengrep-action@LATEST_SHA256_HASH
+        continue-on-error: true  # Keep this reporting workflow advisory when findings exist
+        with:
+          config: '.semgrep.yml'
+          target: '.'
+          output-format: 'json'
+          additional-safe-flags: '--metrics=off --force-color'
+
+  single-format-tests:
+    name: Test Single Output Formats
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Test single output formats (json/sarif is tested in main job)
+        format: [json, sarif, text]
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Create Format Fixture
+        run: |
+          source tests/helpers/format-output-validation.sh
+          create_format_fixture test-code/security-single-format
+
+      - name: Run OpenGrep Single Format (${{ matrix.format }})
+        id: scan
+        uses: ./  # Use local action
+        with:
+          target: 'test-code/security-single-format/src/'
+          patterns: 'test-code/security-single-format/rules.yml'
+          output-format: ${{ matrix.format }}  # Override json/sarif default
+          output-file: 'results.${{ matrix.format }}'
+          strict: 'false'  # Don't fail on findings for this test
+
+      - name: Verify Single Format Output
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_format_output "${MATRIX_FORMAT}" "${STEPS_SCAN_OUTPUTS_RESULTS_FILE}"
+        env:
+          MATRIX_FORMAT: ${{ matrix.format }}
+          STEPS_SCAN_OUTPUTS_RESULTS_FILE: ${{ steps.scan.outputs.results-file }}
+
+  json-sarif-processing:
+    name: Advanced JSON/SARIF Processing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Run OpenGrep with JSON/SARIF Output
+        id: scan
+        uses: ./  # Use local action
+        continue-on-error: true  # Findings are summarized and uploaded without failing status checks
+        with:
+          patterns: 'auto'  # Use the curated default rule set
+          target: '.'
+          severity: 'WARNING'
+          # json/sarif output is default - creates both JSON and SARIF
+          # Verified OpenGrep options (no Semgrep dependencies)
+          enable-experimental: 'true'
+          dataflow-traces: 'true'
+          disable-version-check: 'true'
+          additional-safe-flags: '--matching-explanations'
+
+      - name: Generate Security Report
+        if: always()
+        run: |
+          # shellcheck disable=SC2129
+          JSON_FILE="${STEPS_SCAN_OUTPUTS_JSON_FILE}"
+
+          if [ -f "$JSON_FILE" ]; then
+            echo "# Security Scan Report" > security-report.md
+            echo "" >> security-report.md
+
+            TOTAL_FINDINGS=$(jq '.results | length' "$JSON_FILE")
+            echo "**Total Findings:** $TOTAL_FINDINGS" >> security-report.md
+            echo "" >> security-report.md
+
+            # Count by severity
+            HIGH_COUNT=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' "$JSON_FILE")
+            MEDIUM_COUNT=$(jq '[.results[] | select(.extra.severity == "WARNING")] | length' "$JSON_FILE")
+            LOW_COUNT=$(jq '[.results[] | select(.extra.severity == "INFO")] | length' "$JSON_FILE")
+
+            echo "- 🔴 High: $HIGH_COUNT" >> security-report.md
+            echo "- 🟡 Medium: $MEDIUM_COUNT" >> security-report.md
+            echo "- 🔵 Low: $LOW_COUNT" >> security-report.md
+
+            cat security-report.md
+          fi
+        env:
+          STEPS_SCAN_OUTPUTS_JSON_FILE: ${{ steps.scan.outputs.json-file }}
+
+      - name: Upload Custom Report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: security-report
+          path: security-report.md
+
+  baseline-comparison:
+    name: Baseline Comparison Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0  # Fetch full history for baseline comparison
+          persist-credentials: false
+
+      - name: Resolve Baseline Commit
+        id: baseline
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          zero_sha='0000000000000000000000000000000000000000'
+          baseline_ref=''
+
+          case "$EVENT_NAME" in
+            pull_request)
+              baseline_ref="$PR_BASE_SHA"
+              ;;
+            push)
+              if [ -n "$PUSH_BEFORE_SHA" ] && [ "$PUSH_BEFORE_SHA" != "$zero_sha" ]; then
+                baseline_ref="$PUSH_BEFORE_SHA"
+              elif git rev-parse --verify 'HEAD^' >/dev/null 2>&1; then
+                baseline_ref='HEAD^'
+              fi
+              ;;
+            *)
+              printf 'No baseline comparison is configured for event: %s\n' "$EVENT_NAME"
+              printf 'available=false\n' >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          if [ -z "$baseline_ref" ]; then
+            printf 'No baseline commit is available for this %s event\n' "$EVENT_NAME"
+            printf 'available=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git rev-parse --verify "${baseline_ref}^{commit}" >/dev/null 2>&1; then
+            printf 'Baseline commit is not available in checkout: %s\n' "$baseline_ref"
+            printf 'available=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf 'Using baseline commit: %s\n' "$baseline_ref"
+          printf 'available=true\n' >> "$GITHUB_OUTPUT"
+          printf 'ref=%s\n' "$baseline_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Run OpenGrep Baseline Scan
+        if: steps.baseline.outputs.available == 'true'
+        uses: ./  # Use local action
+        continue-on-error: true  # Baseline results are advisory in this example workflow
+        with:
+          target: '.'
+          output-format: 'json'
+          baseline-commit: ${{ steps.baseline.outputs.ref }}
+          output-file: 'baseline-diff.json'
