@@ -48,10 +48,6 @@ jobs:
   run-tests:
     runs-on: ubuntu-latest
     needs: validate-tag
-    strategy:
-      matrix:
-        os: [ubuntu-latest, ubuntu-20.04]
-        test-type: [basic, integration, security]
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40
@@ -63,20 +59,77 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install just
-        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+      - name: Run validator unit tests
+        run: tests/unit/bats/bin/bats tests/unit/
 
-      - name: Run ${{ matrix.test-type }} tests on ${{ matrix.os }}
+      - name: Create release test fixture
         run: |
-          just test-${{ matrix.test-type }}
+          source tests/helpers/format-output-validation.sh
+          create_format_fixture test-code/release-format
+
+      - name: Run release basic scan
+        id: release-basic
+        uses: ./
+        with:
+          target: 'test-code/release-format/src/'
+          patterns: 'test-code/release-format/rules.yml'
+          output-format: 'json/sarif'
+          strict: 'false'
+
+      - name: Verify release basic scan
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_format_json_finding "${STEPS_BASIC_OUTPUTS_JSON_FILE}"
+          assert_format_sarif_finding "${STEPS_BASIC_OUTPUTS_SARIF_FILE}"
+        env:
+          STEPS_BASIC_OUTPUTS_JSON_FILE: ${{ steps.release-basic.outputs.json-file }}
+          STEPS_BASIC_OUTPUTS_SARIF_FILE: ${{ steps.release-basic.outputs.sarif-file }}
+
+      - name: Run release integration scan
+        id: release-integration
+        uses: ./
+        with:
+          target: 'test-code/'
+          patterns: 'auto'
+          output-format: 'json/sarif'
+          strict: 'false'
+
+      - name: Verify release integration scan
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_valid_json_file "${STEPS_INTEGRATION_OUTPUTS_JSON_FILE}"
+          assert_valid_sarif_file "${STEPS_INTEGRATION_OUTPUTS_SARIF_FILE}"
+        env:
+          STEPS_INTEGRATION_OUTPUTS_JSON_FILE: ${{ steps.release-integration.outputs.json-file }}
+          STEPS_INTEGRATION_OUTPUTS_SARIF_FILE: ${{ steps.release-integration.outputs.sarif-file }}
+
+      - name: Run release invalid input check
+        id: invalid
+        uses: ./
+        continue-on-error: true
+        with:
+          target: '../../etc/passwd'
+          strict: 'false'
+
+      - name: Verify release invalid input was rejected
+        run: |
+          [ "${STEPS_INVALID_OUTCOME}" = "failure" ] || {
+            echo "Expected validation failure, got ${STEPS_INVALID_OUTCOME}"
+            exit 1
+          }
+        env:
+          STEPS_INVALID_OUTCOME: ${{ steps.invalid.outcome }}
 
       - name: Upload test results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: test-results-${{ matrix.os }}-${{ matrix.test-type }}
+          name: test-results-native
           path: |
             test-results/
+            opengrep-results/
             *.log
             *.sarif
             *.json
