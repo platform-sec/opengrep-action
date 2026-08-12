@@ -81,13 +81,20 @@ inputs:
       Use an explicit version for reproducibility or latest to opt into the
       newest upstream release at runtime.
     required: false
-    default: '1.20.0'
+    default: '1.26.0'
   opengrep-checksum:
     description: >
-      Optional SHA256 checksum for opengrep-core_linux_x86.tar.gz. When empty,
-      the pinned default checksum is used for the default version; other
-      versions resolve the checksum from OpenGrep release metadata.
+      Optional SHA256 checksum for the opengrep_manylinux_x86 CLI asset. When
+      empty, the pinned default checksum is used for the default version;
+      other versions resolve the checksum from OpenGrep release metadata.
     required: false
+  verify-signature:
+    description: >
+      Verify the Sigstore signature published alongside the OpenGrep release
+      asset. Requires cosign, which this action installs when enabled. Set to
+      false only if your runner cannot reach the Sigstore transparency log.
+    required: false
+    default: 'true'
   additional-safe-flags:
     description: >
       Additional safe flags (verified OpenGrep features):
@@ -131,6 +138,7 @@ runs:
         INPUTS_SEVERITY: ${{ inputs.severity }}
         INPUTS_OPENGREP_VERSION: ${{ inputs.opengrep-version }}
         INPUTS_OPENGREP_CHECKSUM: ${{ inputs.opengrep-checksum }}
+        INPUTS_VERIFY_SIGNATURE: ${{ inputs.verify-signature }}
         INPUTS_ADDITIONAL_SAFE_FLAGS: ${{ inputs.additional-safe-flags }}
       run: |
         set -euo pipefail
@@ -142,6 +150,11 @@ runs:
         # call sites below convert that to `exit 1`.
         # shellcheck source=scripts/validators.sh
         source "${GITHUB_ACTION_PATH}/scripts/validators.sh"
+
+        # Fail fast on an unsupported runner. The install step only knows how
+        # to fetch the Linux/X64 asset; without this the failure surfaces as a
+        # curl 404 several steps later.
+        resolve_opengrep_asset "${RUNNER_OS:-}" "${RUNNER_ARCH:-}" >/dev/null || exit 1
 
         # Validate target path
         if [ -n "${INPUTS_TARGET}" ]; then
@@ -180,6 +193,7 @@ runs:
         validate_boolean "force-color" "${INPUTS_FORCE_COLOR}" || exit 1
         validate_boolean "exclude-minified-files" "${INPUTS_EXCLUDE_MINIFIED_FILES}" || exit 1
         validate_boolean "disable-version-check" "${INPUTS_DISABLE_VERSION_CHECK}" || exit 1
+        validate_boolean "verify-signature" "${INPUTS_VERIFY_SIGNATURE}" || exit 1
 
         # Validate OpenGrep install controls
         validate_opengrep_version "${INPUTS_OPENGREP_VERSION}" || exit 1
@@ -276,16 +290,25 @@ runs:
 
         printf '✅ Secure environment configured\n'
 
+    - name: Install Cosign
+      if: inputs.verify-signature == 'true'
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
     - name: Install OpenGrep
       id: install
       shell: bash
       env:
         INPUTS_OPENGREP_VERSION: ${{ inputs.opengrep-version }}
         INPUTS_OPENGREP_CHECKSUM: ${{ inputs.opengrep-checksum }}
+        INPUTS_VERIFY_SIGNATURE: ${{ inputs.verify-signature }}
+        INPUTS_DISABLE_VERSION_CHECK: ${{ inputs.disable-version-check }}
       run: |
         set -euo pipefail
 
         printf '\033[36mInstalling OpenGrep...\033[0m\n'
+
+        # shellcheck source=scripts/validators.sh
+        source "${GITHUB_ACTION_PATH}/scripts/validators.sh"
 
         # Create secure temporary directory
         TEMP_DIR=$(mktemp -d -t opengrep-install-XXXXXXXXXX)
@@ -293,13 +316,38 @@ runs:
 
         cd "$TEMP_DIR"
 
-        # Download with integrity verification
-        DEFAULT_OPENGREP_VERSION="1.20.0"
-        DEFAULT_EXPECTED_SHA256="312b705c0011c15303b45ea19242a0df7452a02129dddb89c1a21190ae67410b"
-        ASSET_NAME="opengrep-core_linux_x86.tar.gz"
+        # Download with integrity verification.
+        #
+        # ASSET_NAME is the *CLI* asset, not opengrep-core. Upstream ships two
+        # different binaries per release and they are not interchangeable:
+        #
+        #   opengrep_manylinux_x86         the CLI users install locally; signed
+        #   opengrep-core_linux_x86.tar.gz the engine; unsigned
+        #
+        # They report the same version and find the same issues, but order
+        # results that share a line and column differently. That ordering feeds
+        # opengrep's extra.fingerprint, so installing the engine here made CI
+        # disagree with every developer running opengrep locally and made
+        # importers (DefectDojo et al.) churn findings on every alternating
+        # import. The CLI asset also carries a Sigstore .sig/.cert pair, which
+        # is what the verification below consumes.
+        #
+        # Do not "simplify" this back to opengrep-core: that binary dispatches
+        # on argv[0] and only exposes the `--config=` CLI when it is named
+        # exactly `opengrep`, so the swap fails as a confusing bad-argument
+        # error rather than a missing-file one.
+        DEFAULT_OPENGREP_VERSION="1.26.0"
+        DEFAULT_EXPECTED_SHA256="40c21299eeddabf743b856daa843d24f9d4a027130671cd45b3b21776fd9ab26"
+        ASSET_NAME="$(resolve_opengrep_asset "${RUNNER_OS:-}" "${RUNNER_ARCH:-}")"
         OPENGREP_VERSION="${INPUTS_OPENGREP_VERSION:-$DEFAULT_OPENGREP_VERSION}"
         EXPECTED_SHA256="${INPUTS_OPENGREP_CHECKSUM}"
         DOWNLOAD_URL=""
+
+        # Sigstore identity of the upstream workflow that signs release assets.
+        # Verified stable across releases; update it here if OpenGrep renames
+        # or moves its release workflow.
+        COSIGN_IDENTITY="https://github.com/opengrep/opengrep/.github/workflows/rolling-release.yml@refs/heads/main"
+        COSIGN_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
         if [ "$OPENGREP_VERSION" = "latest" ]; then
           RELEASE_API_URL="https://api.github.com/repos/opengrep/opengrep/releases/latest"
@@ -351,27 +399,53 @@ runs:
           fi
         fi
 
+        RELEASE_BASE_URL="https://github.com/opengrep/opengrep/releases/download/v$OPENGREP_VERSION"
         if [ -z "$DOWNLOAD_URL" ]; then
-          DOWNLOAD_URL="https://github.com/opengrep/opengrep/releases/download/v$OPENGREP_VERSION/$ASSET_NAME"
+          DOWNLOAD_URL="$RELEASE_BASE_URL/$ASSET_NAME"
         fi
 
-        printf 'Downloading OpenGrep v%s...\n' "$OPENGREP_VERSION"
-        curl -fsSL -o opengrep.tar.gz "$DOWNLOAD_URL"
+        printf 'Downloading OpenGrep v%s (%s)...\n' "$OPENGREP_VERSION" "$ASSET_NAME"
+        curl -fsSL -o opengrep-asset "$DOWNLOAD_URL"
 
-        # Verify checksum - fail hard if no tool is available
+        # Verify checksum - fail hard if no tool is available.
+        # The pinned checksum is the integrity gate: it is reviewed at commit
+        # time (and bot-bumped by .github/workflows/update-opengrep.yml), so a
+        # mutated upstream release cannot silently change what gets installed.
+        # Signature verification below is provenance, not a replacement.
         printf 'Verifying download integrity...\n'
         if command -v sha256sum >/dev/null; then
-          printf '%s  opengrep.tar.gz\n' "$EXPECTED_SHA256" | sha256sum -c -
+          printf '%s  opengrep-asset\n' "$EXPECTED_SHA256" | sha256sum -c -
         elif command -v shasum >/dev/null; then
-          printf '%s  opengrep.tar.gz\n' "$EXPECTED_SHA256" | shasum -a 256 -c -
+          printf '%s  opengrep-asset\n' "$EXPECTED_SHA256" | shasum -a 256 -c -
         else
           printf 'Error: No SHA256 tool available - cannot verify download integrity\n' >&2
           exit 1
         fi
 
-        # Extract with safety checks
-        printf 'Extracting OpenGrep...\n'
-        tar -xzf opengrep.tar.gz --no-same-owner --no-same-permissions
+        # Verify the Sigstore signature published alongside the asset. This
+        # proves the binary was produced by OpenGrep's own release workflow,
+        # which a checksum alone cannot establish.
+        if [ "${INPUTS_VERIFY_SIGNATURE}" = "true" ]; then
+          if ! command -v cosign >/dev/null; then
+            printf 'Error: cosign is required when verify-signature is true\n' >&2
+            exit 1
+          fi
+
+          printf 'Verifying OpenGrep release signature...\n'
+          curl -fsSL -o opengrep-asset.sig "$RELEASE_BASE_URL/$ASSET_NAME.sig"
+          curl -fsSL -o opengrep-asset.cert "$RELEASE_BASE_URL/$ASSET_NAME.cert"
+
+          cosign verify-blob \
+            --certificate opengrep-asset.cert \
+            --signature opengrep-asset.sig \
+            --certificate-identity "$COSIGN_IDENTITY" \
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+            opengrep-asset
+
+          printf '✅ Signature verified (%s)\n' "$COSIGN_IDENTITY"
+        else
+          printf 'Warning: signature verification disabled (verify-signature=false)\n' >&2
+        fi
 
         # Install to a runner-writable location and expose it to later steps.
         INSTALL_ROOT="${RUNNER_TEMP:-${GITHUB_WORKSPACE:-}}"
@@ -388,11 +462,33 @@ runs:
         esac
         INSTALL_DIR="$INSTALL_ROOT/opengrep/bin"
         mkdir -p "$INSTALL_DIR"
-        install -m 755 opengrep-core "$INSTALL_DIR/opengrep"
+        # The CLI asset is a bare executable, not an archive, and behaves the
+        # same under any name. It is installed as `opengrep` for readable logs.
+        install -m 755 opengrep-asset "$INSTALL_DIR/opengrep"
         printf 'opengrep-bin=%s\n' "$INSTALL_DIR/opengrep" >> "$GITHUB_OUTPUT"
 
         # Verify installation
-        "$INSTALL_DIR/opengrep" --version
+        INSTALLED_VERSION="$("$INSTALL_DIR/opengrep" --version)"
+        printf 'Installed OpenGrep %s\n' "$INSTALLED_VERSION"
+
+        # Best-effort staleness notice: tell the user when the pinned version
+        # trails upstream. Never fails the run and never changes what is
+        # installed; suppressed by disable-version-check.
+        if [ "${INPUTS_DISABLE_VERSION_CHECK}" != "true" ] \
+          && [ "${INPUTS_OPENGREP_VERSION}" != "latest" ] \
+          && command -v jq >/dev/null; then
+          LATEST_VERSION=""
+          if curl -fsSL --max-time 10 \
+            -H "Accept: application/vnd.github+json" \
+            -o latest-release.json \
+            "https://api.github.com/repos/opengrep/opengrep/releases/latest" 2>/dev/null; then
+            LATEST_VERSION="$(jq -r '(.tag_name // "") | sub("^v"; "")' latest-release.json 2>/dev/null || printf '')"
+          fi
+          if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$OPENGREP_VERSION" ]; then
+            printf 'Notice: OpenGrep v%s is pinned; upstream latest is v%s.\n' \
+              "$OPENGREP_VERSION" "$LATEST_VERSION"
+          fi
+        fi
 
         printf '✅ OpenGrep installed successfully\n'
 
@@ -732,8 +828,13 @@ runs:
           fi
         done
 
-        # Fallback: some differential scans emit structured output to stdout
-        # without creating the requested file path.
+        # The CLI asset honours --json-output/--sarif-output and writes the
+        # requested path directly; the matching --json/--sarif flag also echoes
+        # the report to stdout, which is captured above. The file is the
+        # primary transport and the stdout capture is the fallback, used only
+        # when the file is absent — some differential scans emit to stdout
+        # without creating the requested path. Whichever path is taken, the
+        # result is asserted well-formed below rather than assumed.
         if [ -n "$JSON_FILE" ] && [ ! -f "$JSON_FILE" ] \
           && [ -n "$JSON_STDOUT_CAPTURE" ] && [ -s "$JSON_STDOUT_CAPTURE" ] \
           && jq empty "$JSON_STDOUT_CAPTURE" >/dev/null 2>&1; then
@@ -753,29 +854,42 @@ runs:
         fi
         rm -f "$JSON_STDOUT_CAPTURE" "$SARIF_STDOUT_CAPTURE" "$TEXT_STDOUT_CAPTURE"
 
-        # Validate expected output files were created
+        # Validate expected output files were created *and* are well-formed.
+        #
+        # Existence alone is not enough. A truncated or empty structured report
+        # parses downstream as "no findings", and an importer configured to
+        # close stale findings will then close everything. Assert the file is
+        # non-empty and valid before reporting success.
+        assert_structured_output() {
+          local label="$1"
+          local file="$2"
+          local required_field="$3"
+
+          if [ ! -f "$file" ]; then
+            printf '❌ %s output file not created: %s\n' "$label" "$file"
+            return 1
+          fi
+          if [ ! -s "$file" ]; then
+            printf '❌ %s output file is empty: %s\n' "$label" "$file"
+            return 1
+          fi
+          if ! jq -e "$required_field" "$file" >/dev/null 2>&1; then
+            printf '❌ %s output file is not valid %s: %s\n' "$label" "$label" "$file"
+            return 1
+          fi
+          return 0
+        }
+
         case "${INPUTS_OUTPUT_FORMAT}" in
           "json/sarif")
-            if [ ! -f "$JSON_FILE" ]; then
-              printf '❌ JSON output file not created: %s\n' "$JSON_FILE"
-              exit 1
-            fi
-            if [ ! -f "$SARIF_FILE" ]; then
-              printf '❌ SARIF output file not created: %s\n' "$SARIF_FILE"
-              exit 1
-            fi
+            assert_structured_output "JSON" "$JSON_FILE" 'has("results")' || exit 1
+            assert_structured_output "SARIF" "$SARIF_FILE" 'has("runs")' || exit 1
             ;;
           "json")
-            if [ ! -f "$JSON_FILE" ]; then
-              printf '❌ JSON output file not created: %s\n' "$JSON_FILE"
-              exit 1
-            fi
+            assert_structured_output "JSON" "$JSON_FILE" 'has("results")' || exit 1
             ;;
           "sarif")
-            if [ ! -f "$SARIF_FILE" ]; then
-              printf '❌ SARIF output file not created: %s\n' "$SARIF_FILE"
-              exit 1
-            fi
+            assert_structured_output "SARIF" "$SARIF_FILE" 'has("runs")' || exit 1
             ;;
           "text")
             if [ ! -f "$RESULTS_FILE" ]; then
@@ -845,7 +959,9 @@ runs:
           JSON_FILE="${STEPS_SCAN_OUTPUTS_JSON_FILE:-}"
           if [ -n "$JSON_FILE" ] && [ -f "$JSON_FILE" ] && command -v jq >/dev/null; then
             printf '📋 Sample findings:\n'
-            jq -r '.results[:3] | .[] | "- \(.check_id): \(.message)"' \
+            # The message lives under .extra; the top-level .message key does
+            # not exist and previously rendered every sample as "null".
+            jq -r '.results[:3] | .[] | "- \(.check_id): \(.extra.message // .message // "")"' \
               "$JSON_FILE" 2>/dev/null || true
           fi
         fi

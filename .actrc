@@ -1,4 +1,11 @@
--P ubuntu-latest=catthehacker/ubuntu:act-22.04
+# Local layer over catthehacker/ubuntu:act-22.04 that adds packages the act
+# image lacks but GitHub-hosted runners have. Build it with
+# `just build-act-image`; see tests/act/Dockerfile.
+-P ubuntu-latest=opengrep-action-act:local
+
+# The runner image is built locally, not published, so act must not try to
+# pull it. `just build-act-image` pulls the upstream base itself.
+--pull=false
 
 --env GITHUB_TOKEN=fake_token_for_testing
 

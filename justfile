@@ -6,9 +6,15 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
 
-docker_image := "catthehacker/ubuntu:act-22.04"
+# Base image act ships with, and the local layer built on top of it by
+# `build-act-image` (see tests/act/Dockerfile). .actrc maps ubuntu-latest to
+# the derived image, so it must exist before any act-based recipe runs.
+base_docker_image := "catthehacker/ubuntu:act-22.04"
+docker_image      := "opengrep-action-act:local"
 act_version  := "v0.2.69"
-test_timeout := "300"
+# Per-job wall clock; see TEST_TIMEOUT in tests/test-runner.sh for why the
+# install path is slower than a plain download.
+test_timeout := "600"
 zizmor_version := "1.24.1"
 
 project_root := justfile_directory()
@@ -38,6 +44,11 @@ check:
     @echo "✅ action.yml found"
     @[ -f .github/workflows/test-opengrep-action.yml ] || { echo "❌ Test workflow not found"; exit 1; }
     @echo "✅ Test workflow found"
+    @if docker image inspect {{docker_image}} >/dev/null 2>&1; then \
+        echo "✅ Act image: {{docker_image}}"; \
+    else \
+        echo "⚠️  Act image {{docker_image}} missing. Run 'just build-act-image'"; \
+    fi
 
 # Install act for local GitHub Actions testing
 install-act:
@@ -54,12 +65,21 @@ install-act:
     sudo mv act /usr/local/bin/
     echo "✅ Act installed: $(act --version)"
 
+# Build the local act runner image (adds packages the act image lacks)
+build-act-image:
+    @echo "🔄 Pulling base image {{base_docker_image}}..."
+    @docker pull {{base_docker_image}} >/dev/null 2>&1 || { echo "❌ Failed to pull base image"; exit 1; }
+    @echo "🔄 Building {{docker_image}}..."
+    @docker build --quiet \
+        --build-arg BASE_IMAGE={{base_docker_image}} \
+        -t {{docker_image}} \
+        "{{tests_dir}}/act" >/dev/null || { echo "❌ Failed to build act image"; exit 1; }
+    @echo "✅ Act image ready: {{docker_image}}"
+
 # Setup test environment
-setup: check
+setup: check build-act-image
     @echo "🔄 Setting up test environment..."
     @mkdir -p "{{results_dir}}" "{{security_dir}}/results"
-    @echo "🔄 Pulling Docker image {{docker_image}}..."
-    @docker pull {{docker_image}} >/dev/null 2>&1 || { echo "❌ Failed to pull Docker image"; exit 1; }
     @"{{tests_dir}}/test-runner.sh" setup
     @echo "✅ Test environment ready"
 
@@ -275,11 +295,8 @@ clean-docker:
 
 # --- Docker helpers ------------------------------------------------------
 
-# Pull required Docker images
-docker-pull:
-    @echo "📥 Pulling {{docker_image}}..."
-    @docker pull {{docker_image}}
-    @echo "✅ Docker image pulled"
+# Pull the base image and build the local act runner image
+docker-pull: build-act-image
 
 # Show Docker resource usage
 docker-status:

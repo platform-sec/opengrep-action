@@ -22,7 +22,9 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DOCKER_IMAGE = "catthehacker/ubuntu:act-22.04"
+# Local layer over catthehacker/ubuntu:act-22.04 adding packages the act image
+# lacks but GitHub-hosted runners have. Built by `just build-act-image`.
+DOCKER_IMAGE = "opengrep-action-act:local"
 ACT_TIMEOUT_SECONDS = 180
 
 # name, input field, payload, substring that must appear in act's output
@@ -34,6 +36,7 @@ CASES = [
     ("enum_bypass",       "severity", "INFO; echo OWNED",   "Invalid severity level"),
     ("control_char",      "target",   "ok\n../etc/passwd",  "Invalid characters in path"),
     ("baseline_commit",   "baseline-commit", "../../etc/passwd", "Path traversal detected"),
+    ("boolean_bypass",    "verify-signature", "true; echo OWNED", "verify-signature must be"),
 ]
 
 
@@ -42,6 +45,18 @@ def act_bin() -> str:
     path = shutil.which("act")
     if not path:
         pytest.skip("act is not installed")
+
+    docker = shutil.which("docker")
+    if not docker:
+        pytest.skip("docker is not installed")
+    probe = subprocess.run(
+        [docker, "image", "inspect", DOCKER_IMAGE],
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"{DOCKER_IMAGE} is missing; run 'just build-act-image'")
+
     return path
 
 
@@ -87,6 +102,8 @@ def test_payload_is_rejected(
             "-W", str(wf_path),
             "-j", "boundary",
             "-P", f"ubuntu-latest={DOCKER_IMAGE}",
+            # The runner image is built locally, never published.
+            "--pull=false",
             "--env", "ACT=true",
         ],
         cwd=REPO_ROOT,

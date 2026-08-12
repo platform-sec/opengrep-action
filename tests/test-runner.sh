@@ -16,8 +16,15 @@ NC='\033[0m' # No Color
 
 # Configuration
 ACT_VERSION="v0.2.69"
-DOCKER_IMAGE="catthehacker/ubuntu:act-22.04"
-TEST_TIMEOUT=300  # 5 minutes (reduced from 10)
+# Local layer over catthehacker/ubuntu:act-22.04 adding packages the act image
+# lacks but GitHub-hosted runners have. Built by `just build-act-image`
+# (tests/act/Dockerfile) and kept in sync with .actrc.
+BASE_DOCKER_IMAGE="catthehacker/ubuntu:act-22.04"
+DOCKER_IMAGE="opengrep-action-act:local"
+# Per-job wall clock. Each job installs cosign, downloads the ~40MB signed
+# OpenGrep CLI, and verifies its signature against the transparency log before
+# scanning; matrix jobs pay that cost per leg and share local bandwidth.
+TEST_TIMEOUT=600  # 10 minutes
 
 echo -e "${BLUE}🧪 OpenGrep GitHub Action Integration Test Runner${NC}"
 echo "=================================================="
@@ -116,6 +123,7 @@ setup_test_environment() {
         log_info "Creating .actrc configuration..."
         cat > .actrc << EOF
 -P ubuntu-latest=$DOCKER_IMAGE
+--pull=false
 --env GITHUB_TOKEN=fake_token_for_testing
 --env RUNNER_DEBUG=1
 --bind
@@ -126,10 +134,14 @@ EOF
     # Create minimal test data (security tests are handled by pytest)
     create_basic_test_data
     
-    # Pull Docker image
-    log_info "Pulling Docker image: $DOCKER_IMAGE"
-    docker pull "$DOCKER_IMAGE"
-    
+    # Build the local act runner image from the base image
+    log_info "Building act image: $DOCKER_IMAGE"
+    docker pull "$BASE_DOCKER_IMAGE"
+    docker build \
+        --build-arg "BASE_IMAGE=$BASE_DOCKER_IMAGE" \
+        -t "$DOCKER_IMAGE" \
+        "$(dirname "${BASH_SOURCE[0]}")/act"
+
     log_success "Integration test environment setup completed"
 }
 
@@ -230,6 +242,7 @@ run_baseline_commit_test() {
 
     cat > "$workspace/.actrc" << EOF
 -P ubuntu-latest=$DOCKER_IMAGE
+--pull=false
 --env GITHUB_TOKEN=fake_token_for_testing
 --bind
 --use-gitignore=false
@@ -299,7 +312,7 @@ EOF
     log_info "Running baseline-commit integration test against fixture repo..."
     (
         cd "$workspace"
-        timeout $TEST_TIMEOUT act -W .github/workflows/baseline-commit.yml -j baseline-commit -P ubuntu-latest="$DOCKER_IMAGE" --env ACT=true --verbose
+        timeout $TEST_TIMEOUT act -W .github/workflows/baseline-commit.yml -j baseline-commit -P ubuntu-latest="$DOCKER_IMAGE" --pull=false --env ACT=true --verbose
     )
     rc=$?
     if [ $rc -eq 0 ]; then
