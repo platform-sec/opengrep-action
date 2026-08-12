@@ -74,7 +74,7 @@ jobs:
       # Upload both files as artifacts (optional)
       - name: Upload Scan Results
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: opengrep-results
           path: |
@@ -105,7 +105,7 @@ jobs:
       # Example of conditional upload (only on main branch)
       - name: Upload Security Results (Main Branch Only)
         if: always() && github.ref == 'refs/heads/main' && steps.single-scan.outputs.results-file != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: security-scan-main
           path: ${{ steps.single-scan.outputs.results-file }}
@@ -226,7 +226,7 @@ jobs:
 
       - name: Upload Custom Report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: security-report
           path: security-report.md
