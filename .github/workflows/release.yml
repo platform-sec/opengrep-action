@@ -266,37 +266,83 @@ jobs:
 
           if [ -z "$PREVIOUS_TAG" ]; then
             echo "No previous tag found, using initial commit"
-            PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+            PREVIOUS_TAG=$(git rev-list --max-parents=0 "$REF_NAME" | tail -n1)
           fi
 
-          echo "Generating changelog from $PREVIOUS_TAG to $CURRENT_VERSION"
+          # Resolve the commit range.
+          #
+          # `git log A..B` silently degrades to "everything reachable from B"
+          # when A is not an ancestor of B, which turns one stale tag into a
+          # changelog that re-lists the project's entire history. v1.0.0 is
+          # exactly that case here: it is its own root commit and shares no
+          # ancestry with main (`git merge-base` exits 1), left behind by a
+          # rebase. Detect it and fall back to this branch's own root so the
+          # notes stay bounded instead of quietly wrong.
+          if git merge-base --is-ancestor "$PREVIOUS_TAG" "$REF_NAME" 2>/dev/null; then
+            RANGE_START="$PREVIOUS_TAG"
+          elif MERGE_BASE=$(git merge-base "$PREVIOUS_TAG" "$REF_NAME" 2>/dev/null); then
+            printf '::warning::%s is not an ancestor of %s; using merge-base %s\n' \
+              "$PREVIOUS_TAG" "$REF_NAME" "$MERGE_BASE"
+            RANGE_START="$MERGE_BASE"
+          else
+            RANGE_START=$(git rev-list --max-parents=0 "$REF_NAME" | tail -n1)
+            printf '::warning::%s shares no history with %s; listing from root %s\n' \
+              "$PREVIOUS_TAG" "$REF_NAME" "$RANGE_START"
+          fi
 
-          # Generate changelog
+          echo "Generating changelog from $RANGE_START to $CURRENT_VERSION"
+
+          # Bucket commits by conventional-commit type.
+          #
+          # Matches the subject only, anchored, allowing an optional scope and
+          # the breaking-change marker; merges are excluded and there is no
+          # result cap. Kept in step with pre-release.yml and
+          # scripts/release.sh — all three previously used unanchored greps
+          # over the whole commit message, which filed a single commit under
+          # several headings at once.
+          KNOWN='^(feat|fix|security|docs|test)(\([^)]+\))?!?:'
+
+          bucket() {
+            # bucket <extended-regex> [invert]; prints "- <subject>" lines.
+            local flag="-E"
+            [ "${2:-}" = "invert" ] && flag="-Ev"
+            git log --no-merges --pretty='%s' "${RANGE_START}..${REF_NAME}" \
+              | grep "$flag" "$1" | sed 's/^/- /' || true
+          }
+
+          # Build the commit sections separately from the template below.
+          #
+          # The template heredoc must stay *quoted*: its body contains
+          # markdown code fences, and in an unquoted heredoc those backticks
+          # are command substitution. That is why the static parts use
+          # __PLACEHOLDER__ substitution rather than direct expansion — and
+          # why the previous `$(git log ...)` calls inside it never ran, and
+          # shipped as literal text in the published release body.
+          SECTIONS=$(cat <<SECTIONS_EOF
+          ### Features
+          $(bucket '^feat(\([^)]+\))?!?:')
+
+          ### Bug Fixes
+          $(bucket '^fix(\([^)]+\))?!?:')
+
+          ### Security
+          $(bucket '^security(\([^)]+\))?!?:')
+
+          ### Documentation
+          $(bucket '^docs(\([^)]+\))?!?:')
+
+          ### Testing
+          $(bucket '^test(\([^)]+\))?!?:')
+
+          ### Other Changes
+          $(bucket "$KNOWN" invert)
+          SECTIONS_EOF
+          )
+
           CHANGELOG=$(cat << 'EOF'
           ## What's Changed
 
-          ### Features
-          $(git log --oneline ${PREVIOUS_TAG}..${REF_NAME} --grep="feat\|feature" --pretty="- %s" | head -20)
-
-          ### Bug Fixes
-          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
-            --grep="fix\|bug" --pretty="- %s" | head -20
-
-          ### Security
-          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
-            --grep="security\|sec\|vuln" --pretty="- %s" | head -10
-
-          ### Documentation
-          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
-            --grep="doc\|docs\|readme" --pretty="- %s" | head -10
-
-          ### Testing
-          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
-            --grep="test\|spec" --pretty="- %s" | head -10
-
-          ### Other Changes
-          git log --oneline ${PREVIOUS_TAG}..${REF_NAME} \
-            --grep="chore\|refactor\|style\|perf" --pretty="- %s" | head -10
+          __SECTIONS__
 
           **Full Changelog**: https://github.com/__REPO__/compare/__PREVIOUS_TAG__..__VERSION__
 
@@ -327,12 +373,31 @@ jobs:
           ```
           EOF
           )
+          CHANGELOG="${CHANGELOG//__SECTIONS__/$SECTIONS}"
           CHANGELOG="${CHANGELOG//__REPO__/$GITHUB_REPOSITORY}"
           CHANGELOG="${CHANGELOG//__PREVIOUS_TAG__/$PREVIOUS_TAG}"
           CHANGELOG="${CHANGELOG//__VERSION__/$NEEDS_VALIDATE_TAG_OUTPUTS_VERSION}"
 
           # Save changelog to file and output
           echo "$CHANGELOG" > release_notes.md
+
+          # A curated RELEASE_NOTES.md wins over the generated changelog.
+          #
+          # pre-release.yml writes that file into the preparation PR, which is
+          # the point at which a human can edit the notes. Without this the
+          # file was committed and then ignored, so hand-edits never reached
+          # the published release. Require it to name the version being
+          # released so a stale file from an earlier release cannot leak in.
+          if [ -f RELEASE_NOTES.md ] \
+            && grep -qF "$NEEDS_VALIDATE_TAG_OUTPUTS_VERSION" RELEASE_NOTES.md; then
+            printf '::notice::Using curated RELEASE_NOTES.md for %s\n' \
+              "$NEEDS_VALIDATE_TAG_OUTPUTS_VERSION"
+            cp RELEASE_NOTES.md release_notes.md
+          elif [ -f RELEASE_NOTES.md ]; then
+            printf '::warning::RELEASE_NOTES.md does not mention %s; using generated notes\n' \
+              "$NEEDS_VALIDATE_TAG_OUTPUTS_VERSION"
+          fi
+
           echo "changelog-file=release_notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release

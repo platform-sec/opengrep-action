@@ -254,24 +254,67 @@ jobs:
       - name: Create release preparation PR (if create_release is false)
         if: github.event.inputs.create_release == 'false'
         run: |
+          set -euo pipefail
+
           NEW_VERSION="${STEPS_VERSION_OUTPUTS_NEW_VERSION}"
           BRANCH_NAME="release/prepare-$NEW_VERSION"
-
-          # Create preparation branch
-          git checkout -b "$BRANCH_NAME"
+          BASE_SHA="$(git rev-parse HEAD)"
 
           # Usage examples are pinned to full commit SHAs; release prep should
           # not rewrite them to mutable version tags.
 
           # Create release notes file
           printf '%s\n' "$STEPS_CHANGELOG_OUTPUTS_CHANGELOG" > RELEASE_NOTES.md
-          git add RELEASE_NOTES.md
 
-          # Commit changes
-          git commit -m "Prepare release $NEW_VERSION" || echo "No changes to commit"
+          # Commit through createCommitOnBranch rather than `git commit`.
+          #
+          # main requires signed commits. A shell commit here is authored by
+          # the workflow with no signature, so the preparation PR could only
+          # ever be squash-merged — and merging it any other way is blocked.
+          # Commits created through this mutation are signed by GitHub.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH_NAME}" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH_NAME}" \
+              -f sha="$BASE_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/heads/${BRANCH_NAME}" -f sha="$BASE_SHA" >/dev/null
+          fi
 
-          # Push branch
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH_NAME"
+          read -r -d '' mutation <<'GRAPHQL' || true
+          mutation($input: CreateCommitOnBranchInput!) {
+            createCommitOnBranch(input: $input) {
+              commit { url }
+            }
+          }
+          GRAPHQL
+
+          commit_url=$(jq -n \
+            --arg query "$mutation" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg branch "$BRANCH_NAME" \
+            --arg headline "chore: prepare release $NEW_VERSION" \
+            --arg oid "$BASE_SHA" \
+            --arg notes "$(base64 -w0 RELEASE_NOTES.md)" \
+            '{
+              query: $query,
+              variables: {
+                input: {
+                  branch: {
+                    repositoryNameWithOwner: $repo,
+                    branchName: $branch
+                  },
+                  message: {headline: $headline},
+                  expectedHeadOid: $oid,
+                  fileChanges: {
+                    additions: [{path: "RELEASE_NOTES.md", contents: $notes}]
+                  }
+                }
+              }
+            }' \
+            | gh api graphql --input - \
+              --jq '.data.createCommitOnBranch.commit.url')
+
+          printf 'Created signed commit: %s\n' "$commit_url"
 
           # Create PR
           gh pr create \
