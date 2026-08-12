@@ -5,6 +5,10 @@ description: >
   Install and run OpenGrep for security scanning with security hardening
 author: 'AppSec Science LLC'
 
+branding:
+  icon: 'zoom-in'
+  color: 'purple'
+
 inputs:
   patterns:
     description: >
