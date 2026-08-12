@@ -285,13 +285,26 @@ security: patch command injection in additional-args processing
 
 ## Release Process
 
-### Automated Releases
+### Releases
 
-Releases are automated based on conventional commits:
+Releases are **not** automated from commit history. A maintainer runs the
+`Pre-Release` workflow and picks the bump type explicitly
+(patch/minor/major/prerelease/custom); the new version is calculated from the
+latest tag. Marking a commit `feat!:` or adding a `BREAKING CHANGE:` trailer
+documents intent for reviewers and the changelog — it does not trigger a major
+release by itself.
 
-- **feat:** → Minor version bump (1.1.0 → 1.2.0)
-- **fix:** → Patch version bump (1.1.0 → 1.1.1)  
-- **feat!:** or **BREAKING CHANGE:** → Major version bump (1.1.0 → 2.0.0)
+Conventional prefixes are used for changelog grouping. Write them accurately
+so your change lands in the right section:
+
+- **feat:** → 🚀 New Features
+- **fix:** → 🐛 Bug Fixes
+- **security:** → 🔒 Security Updates
+- **docs:** → 📝 Documentation
+- **test:** → 🧪 Testing
+- anything else (`ci:`, `chore:`, `refactor:`, `perf:`, `style:`) → Other Changes
+
+Scopes (`fix(ci):`) and the breaking marker (`feat!:`) are matched too.
 
 ### Manual Release Steps (Maintainers)
 

@@ -207,23 +207,74 @@ jobs:
           set -euo pipefail
 
           branch="automation/opengrep-v${LATEST_VERSION}"
+          base_sha="$(git rev-parse HEAD)"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$branch"
-          git add action.yml README.md
-          git commit -m "security: update opengrep to v${LATEST_VERSION}"
-          git push --force-with-lease \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "HEAD:$branch"
+          # Commit through createCommitOnBranch rather than `git commit`.
+          #
+          # main requires signed commits. A commit made by the shell here is
+          # authored by github-actions[bot] with no signature, so the resulting
+          # PR cannot be merged. Commits created through this mutation are
+          # signed by GitHub server-side and satisfy the rule.
+          #
+          # The mutation needs the branch to exist first, so point the ref at
+          # the base commit (creating or resetting it), then commit onto it.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}" \
+              -f sha="$base_sha" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/heads/${branch}" -f sha="$base_sha" >/dev/null
+          fi
+
+          read -r -d '' query <<'GRAPHQL' || true
+          mutation($input: CreateCommitOnBranchInput!) {
+            createCommitOnBranch(input: $input) {
+              commit { url }
+            }
+          }
+          GRAPHQL
+
+          commit_url=$(jq -n \
+            --arg query "$query" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg branch "$branch" \
+            --arg headline "security: update opengrep to v${LATEST_VERSION}" \
+            --arg oid "$base_sha" \
+            --arg action_yml "$(base64 -w0 action.yml)" \
+            --arg readme "$(base64 -w0 README.md)" \
+            '{
+              query: $query,
+              variables: {
+                input: {
+                  branch: {
+                    repositoryNameWithOwner: $repo,
+                    branchName: $branch
+                  },
+                  message: {headline: $headline},
+                  expectedHeadOid: $oid,
+                  fileChanges: {
+                    additions: [
+                      {path: "action.yml", contents: $action_yml},
+                      {path: "README.md", contents: $readme}
+                    ]
+                  }
+                }
+              }
+            }' \
+            | gh api graphql --input - \
+              --jq '.data.createCommitOnBranch.commit.url')
+
+          printf 'Created signed commit: %s\n' "$commit_url"
 
           body=$(cat <<EOF
           Updates the default OpenGrep release used by this action.
 
           - OpenGrep version: v${LATEST_VERSION}
-          - Linux x86 asset checksum: \`${LATEST_CHECKSUM}\`
+          - \`opengrep_manylinux_x86\` checksum: \`${LATEST_CHECKSUM}\`
 
-          The action still verifies the downloaded archive before installation.
+          The checksum above is verified before installation, and the asset's
+          Sigstore signature is checked against the identity pinned in
+          \`action.yml\` — which this workflow confirmed is unchanged.
           EOF
           )
 
