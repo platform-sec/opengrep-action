@@ -5,7 +5,12 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      # Semver tags only. 'v*' also matched the floating major tags
+      # (v1, v2) that update-major-version-tag creates, so any manual
+      # push or move of one started a release run that then died in
+      # validate-tag. The workflow's own pushes are masked because
+      # GITHUB_TOKEN does not re-trigger workflows; a human's are not.
+      - 'v*.*.*'
 
 permissions:
   contents: read
@@ -440,6 +445,15 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
           persist-credentials: false
+
+      # `git tag -a` writes a tagger line and so needs an identity. The runner
+      # has none configured, which failed this job with "empty ident name" on
+      # every release; the floating major tag has therefore never existed,
+      # despite RELEASE.md describing it as part of the contract.
+      - name: Configure Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
 
       - name: Update major version tag
         env:
