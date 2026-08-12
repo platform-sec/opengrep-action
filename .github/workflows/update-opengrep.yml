@@ -55,7 +55,9 @@ jobs:
           release_path = Path(sys.argv[1])
           output_path = Path(sys.argv[2])
           release = json.loads(release_path.read_text())
-          asset_name = "opengrep-core_linux_x86.tar.gz"
+          # Must match ASSET_NAME resolved by resolve_opengrep_asset() in
+          # scripts/validators.sh — the signed CLI asset, not opengrep-core.
+          asset_name = "opengrep_manylinux_x86"
 
           tag_name = release.get("tag_name", "")
           version = tag_name.removeprefix("v")
@@ -81,6 +83,37 @@ jobs:
               handle.write(f"checksum={checksum}\n")
           PY
 
+      - name: Verify Signing Identity Is Unchanged
+        shell: bash
+        env:
+          LATEST_VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # action.yml pins the Sigstore identity it will accept. If upstream
+          # renames or moves its release workflow the pin stops matching and
+          # every consumer's scan fails, so surface the drift here instead.
+          expected=$(grep -oP '(?<=^        COSIGN_IDENTITY=")[^"]+' action.yml)
+
+          cert=$(mktemp)
+          curl -fsSL -o "$cert" \
+            "https://github.com/opengrep/opengrep/releases/download/v${LATEST_VERSION}/opengrep_manylinux_x86.cert"
+
+          actual=$(base64 -d "$cert" \
+            | openssl x509 -noout -ext subjectAltName \
+            | grep -oE 'URI:\S+' \
+            | cut -d: -f2-)
+
+          if [ "$actual" != "$expected" ]; then
+            printf 'Error: OpenGrep signing identity changed.\n' >&2
+            printf '  action.yml pins: %s\n' "$expected" >&2
+            printf '  release v%s uses: %s\n' "$LATEST_VERSION" "$actual" >&2
+            printf 'Update COSIGN_IDENTITY in action.yml before bumping.\n' >&2
+            exit 1
+          fi
+
+          printf 'Signing identity unchanged: %s\n' "$actual"
+
       - name: Update Pinned Version
         id: update
         shell: bash
@@ -98,8 +131,13 @@ jobs:
           version = os.environ["LATEST_VERSION"]
           checksum = os.environ["LATEST_CHECKSUM"]
 
+          # No re.DOTALL: every pattern below spans lines via explicit \n and
+          # relies on `.` stopping at a newline. With DOTALL the lazy
+          # `(?:    .+\n)*?` in the input-default pattern backtracks
+          # catastrophically over the whole file and the job hangs instead of
+          # opening a PR.
           def replace_once(text, pattern, replacement, description):
-              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              updated, count = re.subn(pattern, replacement, text, count=1)
               if count != 1:
                   raise SystemExit(f"Unable to update {description}")
               return updated
