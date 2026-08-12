@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: MIT
+---
+# Dependabot configuration
+# .github/dependabot.yml
+#
+# This repository ships a composite Action whose logic is entirely bash inside
+# action.yml, so there is no packaged dependency tree for an SCA scanner to
+# resolve — a Grype/Trivy scan of the tracked tree finds nothing because there
+# is nothing to find.
+#
+# The real supply-chain surface is the set of third-party Actions consumed by
+# action.yml and .github/workflows/, every one of which is pinned to an
+# immutable commit SHA. That pinning is deliberate and must stay, but immutable
+# pins never pick up upstream security fixes on their own. Dependabot is what
+# closes that loop: it resolves each pinned SHA to its release and rewrites it
+# (along with the trailing `# vX.Y.Z` comment) when upstream publishes.
+#
+# Deliberately NOT managed here: the OpenGrep CLI version. It is pinned in
+# action.yml with a SHA256 checksum plus cosign signature verification, and
+# bumped by .github/workflows/update-opengrep.yml, which knows how to refresh
+# the checksum alongside the version. Dependabot does not.
+version: 2
+
+updates:
+  # Third-party Actions referenced from .github/workflows/*.yml and the root
+  # action.yml (which pins sigstore/cosign-installer).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      # Batch routine bumps into one PR; majors stay separate so a breaking
+      # change to checkout or harden-runner gets reviewed on its own.
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Dev-only: the pytest action-boundary tripwire. Never installed by the
+  # published action, but a stale pytest still runs in contributors' venvs.
+  - package-ecosystem: pip
+    directory: /tests/security
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: test
+    labels:
+      - dependencies
+      - python
+
+  # bats-core, vendored as a submodule at tests/unit/bats.
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: test
+    labels:
+      - dependencies

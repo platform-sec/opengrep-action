@@ -148,6 +148,38 @@ validate_opengrep_version() {
   return 1
 }
 
+# Map a runner platform to the OpenGrep release asset to install.
+#
+# Prints the asset name on stdout and returns 0 for a supported platform;
+# prints an explicit error to stderr and returns 1 otherwise. The action
+# calls this during input validation so an unsupported runner fails with a
+# clear message instead of a curl 404 halfway through the install step.
+#
+# Adding a platform is one case arm plus the matching checksum wiring:
+# upstream publishes opengrep_musllinux_x86, opengrep_manylinux_aarch64,
+# opengrep_musllinux_aarch64, opengrep_osx_arm64, opengrep_osx_x86, and
+# opengrep_windows_x86.exe alongside the manylinux x86 asset used here.
+# Only the manylinux x86 asset is exercised by CI today, so the others stay
+# unsupported rather than untested.
+#
+# Usage: resolve_opengrep_asset <runner-os> <runner-arch>
+resolve_opengrep_asset() {
+  local runner_os="$1"
+  local runner_arch="$2"
+
+  case "${runner_os}/${runner_arch}" in
+    "Linux/X64")
+      printf 'opengrep_manylinux_x86\n'
+      return 0
+      ;;
+  esac
+
+  printf 'Error: Unsupported runner platform: %s/%s. ' \
+    "${runner_os:-unknown}" "${runner_arch:-unknown}" >&2
+  printf 'This action supports Linux/X64 runners only.\n' >&2
+  return 1
+}
+
 # SHA256 validator for user-supplied OpenGrep release checksums.
 validate_sha256() {
   local name="$1"

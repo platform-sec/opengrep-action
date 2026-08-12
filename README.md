@@ -55,10 +55,19 @@ jobs:
 | `jobs` | | Number of parallel jobs. |
 | `strict` | `true` | Return a non-zero exit code when findings exist. |
 | `baseline-commit` | | Git ref or commit hash for differential scans. |
-| `opengrep-version` | | OpenGrep version to install. Use an explicit version for reproducibility or `latest` to opt into the newest release at runtime. |
-| `opengrep-checksum` | | Optional SHA256 checksum for `opengrep-core_linux_x86.tar.gz`. |
+| `opengrep-version` | `1.26.0` | OpenGrep version to install. Use an explicit version for reproducibility or `latest` to opt into the newest release at runtime. |
+| `opengrep-checksum` | | Optional SHA256 checksum for the `opengrep_manylinux_x86` asset. |
+| `verify-signature` | `true` | Verify the Sigstore signature on the OpenGrep release asset. |
 
 See [`action.yml`](action.yml) for the full input list.
+
+## Requirements
+
+This action supports **Linux x64 runners only** (`ubuntu-latest` and friends).
+Any other `RUNNER_OS`/`RUNNER_ARCH` combination fails during input validation
+with an explicit message rather than a download error. Upstream publishes musl,
+arm64, macOS, and Windows assets, so other platforms can be added; they are
+unsupported here because CI does not exercise them.
 
 ## OpenGrep Versioning
 
@@ -66,26 +75,56 @@ By default, this action installs a reviewed OpenGrep release with a checksum
 committed in [`action.yml`](action.yml). That keeps repeated workflow runs
 reproducible.
 
-Use an explicit version when you need a newer OpenGrep release:
+Use an explicit version to pin a different OpenGrep release:
 
 ```yaml
 with:
-  opengrep-version: '1.19.0'
+  opengrep-version: '1.25.0'
 ```
 
-For the strongest override, provide the matching SHA256 checksum from the
-OpenGrep release page:
+For the strongest override, provide the matching SHA256 checksum of that
+release's `opengrep_manylinux_x86` asset:
 
 ```yaml
 with:
-  opengrep-version: '1.19.0'
-  opengrep-checksum: '4bee4161dbc50c3dfc4a627b3971ac518f39c061513aa398cb81ff5daab6dc4c'
+  opengrep-version: '1.26.0'
+  opengrep-checksum: '40c21299eeddabf743b856daa843d24f9d4a027130671cd45b3b21776fd9ab26'
 ```
 
 If `opengrep-checksum` is omitted for a non-default version, the action
 resolves the checksum from OpenGrep release metadata before downloading the
 asset. `opengrep-version: latest` is supported as an explicit opt-in and logs a
 warning because it is not reproducible across workflow runs.
+
+The pinned default is kept current by
+[`update-opengrep.yml`](.github/workflows/update-opengrep.yml), which opens a
+reviewable PR when upstream publishes a release. When the pin trails upstream
+at scan time, the action logs a one-line notice; set `disable-version-check` to
+suppress it.
+
+## Signature Verification
+
+The action installs the `opengrep_manylinux_x86` CLI asset, which upstream
+signs with Sigstore. By default the action installs `cosign` and verifies the
+signature against a pinned identity before installing the binary:
+
+```text
+identity: https://github.com/opengrep/opengrep/.github/workflows/rolling-release.yml@refs/heads/main
+issuer:   https://token.actions.githubusercontent.com
+```
+
+This is a provenance check — it proves the binary came from OpenGrep's own
+release workflow, which a checksum cannot establish. The pinned SHA256 is kept
+as a separate integrity gate, because it is reviewed at commit time and so
+resists a mutated upstream release.
+
+Verification needs egress to GitHub releases and the Sigstore transparency log.
+On a runner that cannot reach them, disable it explicitly:
+
+```yaml
+with:
+  verify-signature: false
+```
 
 ## Outputs
 
@@ -107,6 +146,11 @@ This repository treats the action shell boundary as security-sensitive.
   flags are validated before use.
 - The default OpenGrep download is pinned and checksum-verified; explicit
   version overrides are checksum-verified before installation.
+- The downloaded asset's Sigstore signature is verified against a pinned
+  signing identity before the binary is installed.
+- Structured scan output is asserted to be present and well-formed before the
+  action reports success, so a truncated report cannot be read as "no
+  findings" downstream.
 - Workflows are linted and validated with `actionlint`, `yamllint`, and
   security-focused checks.
 - The test suite includes local GitHub Actions runs through `act`, pytest

@@ -4,11 +4,16 @@
 bats tests source [scripts/validators.sh](../../scripts/validators.sh)
 directly and cover the combinatorial input space in ~2 seconds.
 
-This directory is the **integration tripwire**: a small set of real `act`
-runs that prove the validators are actually wired into the composite
+This directory is the **local integration tripwire**: a small set of real
+`act` runs that prove the validators are actually wired into the composite
 action. The tripwire catches regressions that unit tests cannot see — most
 importantly, a new input added to [action.yml](../../action.yml) without a
 `validate_*` call, or a validator accidentally bypassed by a refactor.
+
+Hosted CI does not use these pytest tests because GitHub Actions can invoke
+the composite action directly with `uses: ./`. The CI security job keeps a
+lighter native matrix for malicious input cases and leaves the stricter
+`act`/log-message checks here for local development.
 
 ## Contents
 
@@ -24,7 +29,7 @@ importantly, a new input added to [action.yml](../../action.yml) without a
 ## Running
 
 ```bash
-just test-security     # runs the 5 cases via pytest (~75s)
+just test-security     # runs the boundary cases via pytest (~75s)
 ```
 
 The recipe creates `tests/security/.venv/` on first use. `act` and Docker

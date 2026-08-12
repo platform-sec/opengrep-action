@@ -134,15 +134,48 @@ jobs:
           echo "new-version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Calculated new version: $NEW_VERSION"
 
-      - name: Install just
-        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
-
-      - name: Run pre-release tests
+      - name: Create pre-release fixture
         run: |
-          echo "🧪 Running pre-release test suite..."
-          just test-basic
-          just test-integration
-          echo "✅ All tests passed"
+          source tests/helpers/format-output-validation.sh
+          create_format_fixture test-code/pre-release-format
+
+      - name: Run pre-release basic scan
+        id: pre-release-basic
+        uses: ./
+        with:
+          target: 'test-code/pre-release-format/src/'
+          patterns: 'test-code/pre-release-format/rules.yml'
+          output-format: 'json/sarif'
+          strict: 'false'
+
+      - name: Verify pre-release basic scan
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_format_json_finding "${STEPS_BASIC_OUTPUTS_JSON_FILE}"
+          assert_format_sarif_finding "${STEPS_BASIC_OUTPUTS_SARIF_FILE}"
+        env:
+          STEPS_BASIC_OUTPUTS_JSON_FILE: ${{ steps.pre-release-basic.outputs.json-file }}
+          STEPS_BASIC_OUTPUTS_SARIF_FILE: ${{ steps.pre-release-basic.outputs.sarif-file }}
+
+      - name: Run pre-release integration scan
+        id: pre-release-integration
+        uses: ./
+        with:
+          target: 'test-code/'
+          patterns: 'auto'
+          output-format: 'json/sarif'
+          strict: 'false'
+
+      - name: Verify pre-release integration scan
+        run: |
+          set -euo pipefail
+          source tests/helpers/format-output-validation.sh
+          assert_valid_json_file "${STEPS_INTEGRATION_OUTPUTS_JSON_FILE}"
+          assert_valid_sarif_file "${STEPS_INTEGRATION_OUTPUTS_SARIF_FILE}"
+        env:
+          STEPS_INTEGRATION_OUTPUTS_JSON_FILE: ${{ steps.pre-release-integration.outputs.json-file }}
+          STEPS_INTEGRATION_OUTPUTS_SARIF_FILE: ${{ steps.pre-release-integration.outputs.sarif-file }}
 
       - name: Generate changelog
         id: changelog
