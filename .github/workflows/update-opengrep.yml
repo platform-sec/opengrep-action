@@ -194,7 +194,7 @@ jobs:
           printf 'changed=true\n' >> "$GITHUB_OUTPUT"
           git diff -- action.yml README.md
 
-      - name: Open Pull Request
+      - name: Prepare update branch
         if: steps.update.outputs.changed == 'true'
         shell: bash
         env:
@@ -278,6 +278,8 @@ jobs:
           EOF
           )
 
+          title="security: update OpenGrep to v${LATEST_VERSION}"
+
           existing_pr=$(gh pr list \
             --base "$BASE_BRANCH" \
             --head "$branch" \
@@ -285,14 +287,34 @@ jobs:
             --json number \
             --jq '.[0].number // empty')
 
+          # Updating an existing PR is permitted; creating one is not.
+          #
+          # GITHUB_TOKEN cannot open pull requests here — the repository keeps
+          # "Allow GitHub Actions to create and approve pull requests" off,
+          # because that toggle also grants Actions the ability to approve.
+          # A token-opened PR would additionally run no CI, since events raised
+          # by GITHUB_TOKEN do not start new workflow runs.
+          #
+          # So: refresh the PR if one is already open, otherwise hand a
+          # pre-filled link to whoever reads the run.
           if [ -n "$existing_pr" ]; then
-            gh pr edit "$existing_pr" \
-              --title "security: update OpenGrep to v${LATEST_VERSION}" \
-              --body "$body"
+            gh pr edit "$existing_pr" --title "$title" --body "$body"
+            pr_url=$(gh pr view "$existing_pr" --json url --jq '.url')
+            {
+              printf '## 🔄 OpenGrep v%s\n\n' "$LATEST_VERSION"
+              printf 'Updated existing **[PR #%s](%s)**.\n' "$existing_pr" "$pr_url"
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf 'Updated PR: %s\n' "$pr_url"
           else
-            gh pr create \
-              --base "$BASE_BRANCH" \
-              --head "$branch" \
-              --title "security: update OpenGrep to v${LATEST_VERSION}" \
-              --body "$body"
+            server="${GITHUB_SERVER_URL:-https://github.com}"
+            pr_url="${server}/${GITHUB_REPOSITORY}/compare/${BASE_BRANCH}...${branch}?expand=1"
+            pr_url="${pr_url}&title=$(printf '%s' "$title" | jq -sRr @uri)"
+            pr_url="${pr_url}&body=$(printf '%s' "$body" | jq -sRr @uri)"
+            {
+              printf '## 🔄 OpenGrep v%s available\n\n' "$LATEST_VERSION"
+              printf "Branch \`%s\` is pushed with a signed commit.\n\n" "$branch"
+              printf '**[→ Open the pull request](%s)**\n\n' "$pr_url"
+              printf 'The form is pre-filled; opening it as yourself is what makes CI run.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf 'Open the PR: %s\n' "$pr_url"
           fi

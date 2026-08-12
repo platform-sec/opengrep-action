@@ -42,8 +42,9 @@ jobs:
   prepare-release:
     runs-on: ubuntu-latest
     permissions:
+      # No pull-requests scope: this job pushes a branch and prints a link,
+      # it never touches the PR API.
       contents: write
-      pull-requests: write
       actions: read
     outputs:
       new-version: ${{ steps.version.outputs.new-version }}
@@ -251,7 +252,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           STEPS_VERSION_OUTPUTS_NEW_VERSION: ${{ steps.version.outputs.new-version }}
 
-      - name: Create release preparation PR (if create_release is false)
+      - name: Prepare release branch (if create_release is false)
         if: github.event.inputs.create_release == 'false'
         run: |
           set -euo pipefail
@@ -316,13 +317,23 @@ jobs:
 
           printf 'Created signed commit: %s\n' "$commit_url"
 
-          # Create PR
-          gh pr create \
-            --title "🚀 Prepare release $NEW_VERSION" \
-            --body "This PR prepares the release for $NEW_VERSION.
+          # Emit a link instead of opening the PR from CI.
+          #
+          # GITHUB_TOKEN cannot create pull requests here: the repository has
+          # "Allow GitHub Actions to create and approve pull requests" off, and
+          # it stays off deliberately — that single toggle also grants Actions
+          # the ability to *approve* PRs, which would undercut any review
+          # requirement later added to main.
+          #
+          # Opening the PR from CI would be the wrong outcome even if it were
+          # permitted: events raised by GITHUB_TOKEN do not start new workflow
+          # runs, so the release PR would carry no CI results at all. A PR
+          # opened by a human gets the full check suite.
+          pr_title="🚀 Prepare release $NEW_VERSION"
+          pr_body="This PR prepares the release for $NEW_VERSION.
 
           ## Changes
-          ${STEPS_CHANGELOG_OUTPUTS_CHANGELOG}
+          The generated changelog is committed as \`RELEASE_NOTES.md\` — review it in the diff.
 
           ## Next Steps
           1. Review the changes
@@ -334,9 +345,23 @@ jobs:
           \`\`\`bash
           git tag -a $NEW_VERSION -m \"Release $NEW_VERSION\"
           git push origin $NEW_VERSION
-          \`\`\`" \
-            --base main \
-            --head "$BRANCH_NAME"
+          \`\`\`"
+
+          server="${GITHUB_SERVER_URL:-https://github.com}"
+          pr_url="${server}/${GITHUB_REPOSITORY}/compare/main...${BRANCH_NAME}?expand=1"
+          pr_url="${pr_url}&title=$(printf '%s' "$pr_title" | jq -sRr @uri)"
+          pr_url="${pr_url}&body=$(printf '%s' "$pr_body" | jq -sRr @uri)"
+
+          {
+            printf '## 🚀 Release %s prepared\n\n' "$NEW_VERSION"
+            printf "Branch \`%s\` is pushed with a signed commit.\n\n" "$BRANCH_NAME"
+            printf '**[→ Open the pull request](%s)**\n\n' "$pr_url"
+            printf 'The form is pre-filled; opening it as yourself is what makes CI run.\n\n'
+            printf '<details><summary>Generated changelog</summary>\n\n%s\n\n</details>\n' \
+              "$STEPS_CHANGELOG_OUTPUTS_CHANGELOG"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          printf 'Open the PR: %s\n' "$pr_url"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -370,7 +395,8 @@ jobs:
             release_tag="${NEEDS_PREPARE_RELEASE_OUTPUTS_NEW_VERSION}"
             echo "- 📦 Release will be available at: $release_url/$release_tag" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- 📝 Preparation PR created" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 📝 Preparation branch pushed with a signed commit" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 🔗 Open the PR via the link in the \`prepare-release\` summary" >> "$GITHUB_STEP_SUMMARY"
             echo "- 🔍 Review the PR and merge when ready" >> "$GITHUB_STEP_SUMMARY"
             echo "- 🏷️ Create tag manually to trigger release" >> "$GITHUB_STEP_SUMMARY"
           fi
