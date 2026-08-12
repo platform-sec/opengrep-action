@@ -145,7 +145,7 @@ jobs:
             xargs -0 shellcheck -x
 
   # Audit GitHub Actions workflows and composite actions with zizmor.
-  # Findings are advisory until the existing baseline is remediated.
+  # Findings at low severity and above fail the build; the baseline is clean.
   zizmor:
     name: GitHub Actions Security
     runs-on: ubuntu-latest
@@ -167,11 +167,54 @@ jobs:
 
       - name: Run zizmor
         run: |
-          uvx "zizmor==${ZIZMOR_VERSION}" \
-            --format=github \
-            --strict-collection \
-            --no-exit-codes \
-            action.yml .github/workflows
+          # Exit codes, measured against zizmor 1.24.1:
+          #   0       clean
+          #   11..14  findings, encoded as 10 + severity rank
+          #           (11 informational, 12 low, 13 medium, 14 high)
+          #   1       the audit itself failed — e.g. the GitHub advisories API
+          #           was unreachable. zizmor then reports "no audit was
+          #           performed", meaning nothing was checked at all.
+          #
+          # The findings band is matched as a range, not as a single code: a
+          # high-severity finding exits 14, so testing for 11 alone would
+          # treat a real vulnerability as a transient error and retry it.
+          #
+          # Several audits (known-vulnerable-actions, artipacked) call the
+          # GitHub API, and a TLS failure reaching it has already produced one
+          # spurious red build. Retry that case; never retry findings, which
+          # are deterministic and would just burn three attempts.
+          #
+          # --no-exit-codes was dropped deliberately. It made every finding
+          # advisory, so this job could not fail on a real result — it was
+          # added while a baseline was outstanding, and that baseline is now
+          # clean (0 low/medium/high). --min-severity=low keeps purely
+          # informational notes, such as the deliberate use of
+          # softprops/action-gh-release, from gating the build.
+          attempt=1
+          max_attempts=3
+
+          while :; do
+            uvx "zizmor==${ZIZMOR_VERSION}" \
+              --format=github \
+              --strict-collection \
+              --min-severity=low \
+              action.yml .github/workflows && rc=0 || rc=$?
+
+            if [ "$rc" -eq 0 ] || { [ "$rc" -ge 10 ] && [ "$rc" -le 19 ]; }; then
+              exit "$rc"
+            fi
+
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              printf '::error::zizmor could not complete an audit after %s attempts (exit %s)\n' \
+                "$attempt" "$rc"
+              exit "$rc"
+            fi
+
+            printf '::warning::zizmor exited %s without auditing (attempt %s/%s); retrying\n' \
+              "$rc" "$attempt" "$max_attempts"
+            sleep $(( attempt * 10 ))
+            attempt=$(( attempt + 1 ))
+          done
         env:
           GH_TOKEN: ${{ github.token }}
 

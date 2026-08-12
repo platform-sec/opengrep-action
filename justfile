@@ -376,7 +376,16 @@ lint-zizmor:
         echo "❌ zizmor is not installed. Run 'just install-zizmor'."
         exit 1
     fi
-    zizmor --strict-collection --no-exit-codes action.yml .github/workflows
+    # Same gate as the zizmor job in ci.yml: fail on low severity and above,
+    # leave purely informational notes advisory. Keep the two in step.
+    # Several audits query the GitHub API; export GH_TOKEN (or run
+    # `gh auth token`) to avoid rate limits.
+    installed="$(zizmor --version | awk '{print $2}')"
+    if [ "$installed" != "{{zizmor_version}}" ]; then
+        echo "⚠️  zizmor $installed installed, CI pins {{zizmor_version}} — results may differ."
+        echo "   Run 'just install-zizmor' to match."
+    fi
+    zizmor --strict-collection --min-severity=low action.yml .github/workflows
 
 # Validate security test configuration
 validate-security:
