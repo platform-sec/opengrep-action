@@ -22,6 +22,58 @@ The OpenGrep Action uses automated release workflows with the following componen
 - **Beta** (v1.0.0-beta.1) - Feature-complete, testing phase
 - **Release Candidate** (v1.0.0-rc.1) - Final testing before stable
 
+### What the version describes
+
+The action's version tracks **the action's own contract** — its inputs,
+outputs, and the stability of the findings it emits. It does not track the
+bundled OpenGrep release.
+
+These are separate axes, and conflating them produces noise in both
+directions:
+
+- Bumping the pinned OpenGrep version is usually **not** a release at all.
+  Measured across OpenGrep 1.20.0 → 1.26.0 — six upstream releases — results
+  were identical: same set, same order, same fingerprints. Consumers who need
+  a specific scanner already have the `opengrep-version` input, and
+  `update-opengrep.yml` leaves a reviewable PR as the audit trail. Batch these
+  into the next release rather than cutting one per upstream release.
+- Anything that changes what consumers observe **is** a release, even when no
+  OpenGrep version moved. Switching from the `opengrep-core` engine to the
+  signed CLI asset kept the same scanner version but re-ordered results that
+  share a line and column, changing `extra.fingerprint` — a major bump,
+  because importers that dedupe on it churn once.
+
+Rules of thumb:
+
+- **Major** - inputs/outputs removed or changed meaning; finding identity
+  changes; the supported runner set narrows.
+- **Minor** - new inputs or outputs, backward compatible.
+- **Patch** - fixes, pinned-scanner bumps, docs, internal changes.
+
+The floating major tag is what makes a breaking change tolerable: publishing
+v2 leaves `v1` pointing at the last v1.x, so existing users pick up the change
+deliberately instead of discovering it. Note that `v1`/`v2` are **mutable** —
+they are force-updated on each release — which is why the README pins usage
+examples to full commit SHAs.
+
+### Known quirk: the v1.0.0 tag
+
+`v1.0.0` is not an ancestor of `main`. It points at `b0f4c3a`, while `main`
+carries `beb8256` for the same change — a rebase left the tag behind. The
+trees are identical, so a checkout of `v1.0.0` gets the right files.
+
+It is deliberately **not** being retagged: `b0f4c3a` is unreachable from any
+branch and only the tag keeps it alive, so moving the tag would make it
+eligible for garbage collection and break anyone who pinned that SHA — the
+exact pinning the README recommends.
+
+The only symptom is that `git log v1.0.0..HEAD` spans the entire history, so
+the **first changelog generated after v1.0.0** will re-list commits that
+predate it (`feat: release v1.0.0`, `chore: initialize repository`). Run
+`Pre-Release` with `create_release: false` and trim `RELEASE_NOTES.md` in the
+preparation PR before merging. Every range from v2.0.0 onward is correct,
+because that tag lands on `main`.
+
 ## Automated Release Process
 
 ### Method 1: GitHub Actions Workflow (Recommended)

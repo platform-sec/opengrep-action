@@ -155,6 +155,29 @@ update_version_references() {
     print_success "Version references updated"
 }
 
+# Select commit subjects by conventional-commit type.
+#
+# Matches the subject only, anchored, allowing an optional scope and the
+# breaking-change marker. The previous unanchored `git log --grep` searched
+# the whole commit message, so a single commit landed in several sections at
+# once and every merge commit matched "sec" via the org name. Merges are
+# excluded and there is no result cap: a silent `head -N` drops real entries
+# from a release's notes.
+#
+# Usage: changelog_bucket <since-ref> <extended-regex> [invert]
+changelog_bucket() {
+    local since="$1"
+    local pattern="$2"
+    local invert="${3:-}"
+    local grep_flag="-E"
+
+    [ "$invert" = "invert" ] && grep_flag="-Ev"
+
+    git log --no-merges --pretty='%s' "${since}..HEAD" \
+        | grep "$grep_flag" "$pattern" \
+        | sed 's/^/- /' || true
+}
+
 # Generate changelog
 generate_changelog() {
     local current_version="$1"
@@ -173,19 +196,20 @@ All notable changes to this project will be documented in this file.
 ## [$new_version] - $(date +%Y-%m-%d)
 
 ### Added
-$(git log --oneline ${current_version}..HEAD --grep="feat\|feature\|add" --pretty="- %s" | head -10)
-
-### Changed
-$(git log --oneline ${current_version}..HEAD --grep="change\|update\|modify" --pretty="- %s" | head -10)
+$(changelog_bucket "$current_version" '^feat(\([^)]+\))?!?:')
 
 ### Fixed
-$(git log --oneline ${current_version}..HEAD --grep="fix\|bug" --pretty="- %s" | head -10)
+$(changelog_bucket "$current_version" '^fix(\([^)]+\))?!?:')
 
 ### Security
-$(git log --oneline ${current_version}..HEAD --grep="security\|sec\|vuln" --pretty="- %s" | head -5)
+$(changelog_bucket "$current_version" '^security(\([^)]+\))?!?:')
 
 ### Documentation
-$(git log --oneline ${current_version}..HEAD --grep="doc\|docs\|readme" --pretty="- %s" | head -5)
+$(changelog_bucket "$current_version" '^docs(\([^)]+\))?!?:')
+
+### Changed
+$(changelog_bucket "$current_version" \
+    '^(feat|fix|security|docs)(\([^)]+\))?!?:' invert)
 
 EOF
 

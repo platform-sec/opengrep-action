@@ -185,27 +185,47 @@ jobs:
 
           echo "Generating changelog from $CURRENT_VERSION to $NEW_VERSION"
 
+          # Bucket commits by conventional-commit type.
+          #
+          # Match the *subject only*, anchored, with the optional scope and
+          # breaking-change marker. `git log --grep` searches the whole message
+          # and is unanchored, which put one commit in four sections at once
+          # and filed every merge commit under Security because the org name
+          # contains "sec".
+          KNOWN='^(feat|fix|security|docs|test)(\([^)]+\))?!?:'
+
+          bucket() {
+            # bucket <extended-regex> [invert]; prints "- <subject>" lines.
+            # Pipe git directly rather than through a variable: printf on an
+            # empty subject list emits a blank line, which survives an
+            # inverted match and renders as a stray "- " entry.
+            local flag="-E"
+            [ "${2:-}" = "invert" ] && flag="-Ev"
+            git log --no-merges --pretty='%s' "${CURRENT_VERSION}..HEAD" \
+              | grep "$flag" "$1" | sed 's/^/- /' || true
+          }
+
           # shellcheck disable=SC2086,SC2129
           CHANGELOG=$(cat << EOF
           ## Changes in $NEW_VERSION
 
           ### 🚀 New Features
-          $(git log --oneline ${CURRENT_VERSION}..HEAD --grep="feat\|feature" --pretty="- %s")
+          $(bucket '^feat(\([^)]+\))?!?:')
 
           ### 🐛 Bug Fixes
-          $(git log --oneline ${CURRENT_VERSION}..HEAD --grep="fix\|bug" --pretty="- %s")
+          $(bucket '^fix(\([^)]+\))?!?:')
 
           ### 🔒 Security Updates
-          $(git log --oneline ${CURRENT_VERSION}..HEAD --grep="security\|sec\|vuln" --pretty="- %s")
+          $(bucket '^security(\([^)]+\))?!?:')
 
           ### 📝 Documentation
-          $(git log --oneline ${CURRENT_VERSION}..HEAD --grep="doc\|docs" --pretty="- %s")
+          $(bucket '^docs(\([^)]+\))?!?:')
 
           ### 🧪 Testing
-          $(git log --oneline ${CURRENT_VERSION}..HEAD --grep="test" --pretty="- %s")
+          $(bucket '^test(\([^)]+\))?!?:')
 
           ### Other Changes
-          $(git log --oneline ${CURRENT_VERSION}..HEAD --grep="chore\|refactor\|style" --pretty="- %s")
+          $(bucket "$KNOWN" invert)
           EOF
           )
 

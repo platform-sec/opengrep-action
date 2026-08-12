@@ -140,15 +140,20 @@ conventional commits by `pre-release.yml` and `release.yml`.
 
 ## Release
 
-`scripts/release.sh` backs the `just release-*` recipes. Version bumps are
-driven by conventional commits:
+`scripts/release.sh` backs the `just release-*` recipes.
 
-- `feat:` -> minor
-- `fix:` -> patch
-- `feat!:` or `BREAKING CHANGE:` -> major
+The version bump is **chosen by a human**, not derived from commit history.
+`pre-release.yml` takes `version_type` (patch/minor/major/prerelease/custom)
+as a workflow input and `calculate_next_version` does arithmetic on the latest
+tag. Nothing parses `feat!:` or `BREAKING CHANGE:` — writing one does not
+produce a major release on its own.
+
+Conventional commit prefixes matter only for changelog grouping, which buckets
+on the anchored subject (`^feat`, `^fix`, `^security`, `^docs`, `^test`, and
+everything else under "Other").
 
 Major-version floating tags such as `v1` and `v2` are force-pushed on release.
-See `RELEASE.md` for details.
+See `RELEASE.md` for what warrants which bump.
 
 ## Editing Rules
 
