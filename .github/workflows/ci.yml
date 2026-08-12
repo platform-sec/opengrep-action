@@ -12,12 +12,18 @@ on:
       - '**.md'
       - 'docs/**'
       - 'assets/**'
+  # No paths-ignore on pull_request, deliberately.
+  #
+  # `CI Success` is the single required status check for main. A required
+  # check that never runs is never reported, and GitHub holds the PR at
+  # "Expected — waiting for status" indefinitely rather than treating it as
+  # passed. Filtering this trigger would therefore deadlock every docs-only
+  # PR — including every release preparation PR, which by design touches
+  # nothing but RELEASE_NOTES.md.
+  #
+  # push keeps its filter: no branch protection gates on those runs.
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'assets/**'
   workflow_dispatch:
 
 permissions:
