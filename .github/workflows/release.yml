@@ -5,7 +5,12 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      # Semver tags only. 'v*' also matched the floating major tags
+      # (v1, v2) that update-major-version-tag creates, so any manual
+      # push or move of one started a release run that then died in
+      # validate-tag. The workflow's own pushes are masked because
+      # GITHUB_TOKEN does not re-trigger workflows; a human's are not.
+      - 'v*.*.*'
 
 permissions:
   contents: read
