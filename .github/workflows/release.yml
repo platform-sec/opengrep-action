@@ -441,6 +441,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # `git tag -a` writes a tagger line and so needs an identity. The runner
+      # has none configured, which failed this job with "empty ident name" on
+      # every release; the floating major tag has therefore never existed,
+      # despite RELEASE.md describing it as part of the contract.
+      - name: Configure Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
       - name: Update major version tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
