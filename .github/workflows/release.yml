@@ -57,6 +57,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          # bats-core is vendored as a submodule at tests/unit/bats. Without
+          # this the runner below is simply absent and the step exits 127.
+          submodules: recursive
           persist-credentials: false
 
       - name: Run validator unit tests
@@ -156,7 +159,11 @@ jobs:
         uses: ./
         with:
           target: '.'
-          patterns: 'security,secrets,owasp-top-10'
+          # `patterns` accepts 'auto', or a path to a rules file/directory.
+          # Anything else is passed through as --pattern (-e), which opengrep
+          # rejects without a matching -l/--lang. A comma-separated ruleset
+          # list was never a supported shape and failed every release.
+          patterns: 'auto'
           severity: 'INFO'
           output-format: 'json/sarif'
           verbose: 'true'
@@ -353,7 +360,7 @@ jobs:
             uses: __REPO__@__VERSION__
             with:
               target: 'src/'
-              patterns: 'security'
+              patterns: 'auto'
               severity: 'WARNING'
           ```
 
