@@ -32,7 +32,14 @@ jobs:
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9-]+)?$ ]]; then
+          # Prerelease suffixes are dot-separated identifiers, per semver:
+          # v2.0.1-rc.1, v1.0.0-beta.1. The previous class was [a-zA-Z0-9-]
+          # with no dot, so it rejected every dotted suffix — including the
+          # examples in the error message below, the ones documented in
+          # RELEASE.md, and the versions pre-release.yml actually generates
+          # (it appends ".1" to the chosen suffix). The two release workflows
+          # therefore disagreed about what a valid prerelease looked like.
+          if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
             echo "Valid tag format: $REF_NAME"
             VERSION="$REF_NAME"
             echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
