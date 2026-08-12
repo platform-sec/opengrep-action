@@ -77,10 +77,7 @@ permissions:
 #### Workflow Security
 - Pin action references to full commit SHAs instead of version tags, branches, or latest aliases
 ```yaml
-# Good - full commit SHA
-uses: platform-sec/opengrep-action@52ffd7b1acae92f0bf27d40187f3bbd9ab382b31
-
-# Bad - moving target references such as branches or mutable tags
+uses: platform-sec/opengrep-action@<REPLACE-WITH-COMMIT-SHA>
 ```
 
 #### Avoiding Common Security Issues

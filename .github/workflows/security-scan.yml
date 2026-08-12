@@ -37,7 +37,7 @@ jobs:
       # Default json/sarif output scan (JSON + SARIF)
       - name: Run OpenGrep Dual Output Scan
         id: dual-scan
-        uses: ./  # Use local action, or replace with platform-sec/opengrep-action@LATEST_SHA256_HASH
+        uses: ./  # Use local action, or replace with platform-sec/opengrep-action@<REPLACE-WITH-COMMIT-SHA>
         continue-on-error: true  # Findings are reported below without failing the workflow
         with:
           target: '.'
@@ -85,7 +85,7 @@ jobs:
       # Single format scan with verified OpenGrep features
       - name: Run OpenGrep Single Format Scan with Verified Features
         id: single-scan
-        uses: ./  # Use local action, or replace with platform-sec/opengrep-action@LATEST_SHA256_HASH
+        uses: ./  # Use local action, or replace with platform-sec/opengrep-action@<REPLACE-WITH-COMMIT-SHA>
         with:
           patterns: 'auto'  # Use the curated default rule set
           target: '.'
@@ -113,7 +113,7 @@ jobs:
 
       # Scan with custom rules file
       - name: Run OpenGrep with Custom Rules
-        uses: ./  # Use local action, or replace with platform-sec/opengrep-action@LATEST_SHA256_HASH
+        uses: ./  # Use local action, or replace with platform-sec/opengrep-action@<REPLACE-WITH-COMMIT-SHA>
         continue-on-error: true  # Keep this reporting workflow advisory when findings exist
         with:
           config: '.semgrep.yml'

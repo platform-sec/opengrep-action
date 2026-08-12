@@ -6,6 +6,17 @@ The action installs a pinned OpenGrep release, validates all user-controlled
 inputs, runs the scan, and exposes JSON/SARIF outputs for downstream workflow
 steps.
 
+## Pinning
+
+Pin this action to a full commit SHA, never to a tag or branch. List every
+released tag with the SHA it points at, newest first, and copy the line you
+want:
+
+```bash
+gh api repos/platform-sec/opengrep-action/tags \
+  --jq '.[] | "uses: platform-sec/opengrep-action@\(.commit.sha)  # \(.name)"'
+```
+
 ## Usage
 
 ```yaml
@@ -25,7 +36,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - id: scan
-        uses: platform-sec/opengrep-action@LATEST_SHA256_HASH
+        # Placeholder — see "Pinning" above for the command that prints the real SHA
+        uses: platform-sec/opengrep-action@<REPLACE-WITH-COMMIT-SHA>
         with:
           target: .
           output-format: json/sarif
