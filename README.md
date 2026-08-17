@@ -67,7 +67,7 @@ jobs:
 | `jobs` | | Number of parallel jobs. |
 | `strict` | `true` | Return a non-zero exit code when findings exist. |
 | `baseline-commit` | | Git ref or commit hash for differential scans. |
-| `opengrep-version` | `1.26.0` | OpenGrep version to install. Use an explicit version for reproducibility or `latest` to opt into the newest release at runtime. |
+| `opengrep-version` | `1.27.1` | OpenGrep version to install. Use an explicit version for reproducibility or `latest` to opt into the newest release at runtime. |
 | `opengrep-checksum` | | Optional SHA256 checksum for the `opengrep_manylinux_x86` asset. |
 | `verify-signature` | `true` | Verify the Sigstore signature on the OpenGrep release asset. |
 
@@ -91,7 +91,7 @@ Use an explicit version to pin a different OpenGrep release:
 
 ```yaml
 with:
-  opengrep-version: '1.25.0'
+  opengrep-version: '1.27.1'
 ```
 
 For the strongest override, provide the matching SHA256 checksum of that
@@ -99,8 +99,8 @@ release's `opengrep_manylinux_x86` asset:
 
 ```yaml
 with:
-  opengrep-version: '1.26.0'
-  opengrep-checksum: '40c21299eeddabf743b856daa843d24f9d4a027130671cd45b3b21776fd9ab26'
+  opengrep-version: '1.27.1'
+  opengrep-checksum: '58053da76672bbeb5b0a5441021c58338707052e10f81d777140ca879bd491ce'
 ```
 
 If `opengrep-checksum` is omitted for a non-default version, the action

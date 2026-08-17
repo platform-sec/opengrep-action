@@ -85,7 +85,7 @@ inputs:
       Use an explicit version for reproducibility or latest to opt into the
       newest upstream release at runtime.
     required: false
-    default: '1.26.0'
+    default: '1.27.1'
   opengrep-checksum:
     description: >
       Optional SHA256 checksum for the opengrep_manylinux_x86 CLI asset. When
@@ -340,8 +340,8 @@ runs:
         # on argv[0] and only exposes the `--config=` CLI when it is named
         # exactly `opengrep`, so the swap fails as a confusing bad-argument
         # error rather than a missing-file one.
-        DEFAULT_OPENGREP_VERSION="1.26.0"
-        DEFAULT_EXPECTED_SHA256="40c21299eeddabf743b856daa843d24f9d4a027130671cd45b3b21776fd9ab26"
+        DEFAULT_OPENGREP_VERSION="1.27.1"
+        DEFAULT_EXPECTED_SHA256="58053da76672bbeb5b0a5441021c58338707052e10f81d777140ca879bd491ce"
         ASSET_NAME="$(resolve_opengrep_asset "${RUNNER_OS:-}" "${RUNNER_ARCH:-}")"
         OPENGREP_VERSION="${INPUTS_OPENGREP_VERSION:-$DEFAULT_OPENGREP_VERSION}"
         EXPECTED_SHA256="${INPUTS_OPENGREP_CHECKSUM}"
