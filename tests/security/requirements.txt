@@ -2,7 +2,7 @@
 #
 # Pinned exactly so a contributor's venv and CI resolve the same tree.
 # Dependabot bumps these (see .github/dependabot.yml).
-pytest==9.1.1
+pytest==9.2.0
 PyYAML==6.0.3
 # Supplies the `timeout = 300` ini option declared in pytest.ini; without it
 # pytest treats that key as an unknown option and the cap silently never fires.
